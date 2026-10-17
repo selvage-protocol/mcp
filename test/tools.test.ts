@@ -406,6 +406,35 @@ test('edit_file refuses an absent old_string, and an ambiguous one unless replac
   assert.match(textOf(all), /2 replacement/);
 });
 
+test('an old_string that only overlaps itself is ambiguous, and replace_all still replaces once', async () => {
+  const target = new StubEngine({
+    role: 'guest',
+    listing: ['a.txt'],
+    texts: new Map([['a.txt', 'aaa']]),
+  });
+  const benchmark = bench({ engine: target, session: { grantWaitMs: 0 } });
+  await call(benchmark, 'session_join', { invite: INVITE });
+
+  // `'aa'` occurs in `'aaa'` at two positions, and only one of them survives a non-overlapping
+  // scan: an edit that picked either would be guessing at which one the caller meant.
+  const ambiguous = failed(
+    await call(benchmark, 'edit_file', { path: 'a.txt', old_string: 'aa', new_string: 'b' }),
+  );
+  assert.match(ambiguous, /appears 2 times/);
+  assert.equal(target.text('a.txt'), 'aaa', 'an overlapping old_string is never guessed at');
+
+  const all = await call(benchmark, 'edit_file', {
+    path: 'a.txt',
+    old_string: 'aa',
+    new_string: 'b',
+    replace_all: true,
+  });
+  assert.equal(all.isError, undefined, textOf(all));
+  // `split`/`join` replaces the non-overlapping occurrences, and that is what is reported.
+  assert.equal(target.text('a.txt'), 'ba');
+  assert.match(textOf(all), /1 replacement/);
+});
+
 test('write_file replaces the whole shared text, and a viewer is refused', async () => {
   const target = new StubEngine({
     role: 'guest',

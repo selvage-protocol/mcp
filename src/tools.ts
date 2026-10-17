@@ -363,7 +363,25 @@ function readFileTool(session: Session): ToolDefinition {
   };
 }
 
-/** How many times `needle` occurs in `hay`, counting overlaps as separate occurrences. */
+/**
+ * How many positions in `hay` spell `needle`, counting overlapping matches as separate ones:
+ * `'aa'` is in `'aaa'` twice. This is the count that decides whether an edit is ambiguous,
+ * because either position is a place the caller's text could have meant.
+ */
+function matchCount(hay: string, needle: string): number {
+  let count = 0;
+  let at = hay.indexOf(needle);
+  while (at !== -1) {
+    count += 1;
+    at = hay.indexOf(needle, at + 1);
+  }
+  return count;
+}
+
+/**
+ * The occurrences a `split`/`join` replacement touches, which never overlap: `'aaa'` holds one
+ * `'aa'` for a `replace_all`, and two for `matchCount`. This is the count an answer reports.
+ */
 function occurrencesOf(hay: string, needle: string): number {
   let count = 0;
   let at = hay.indexOf(needle);
@@ -381,7 +399,7 @@ function wantedText(hay: string, old: string, replacement: string, all: boolean)
   if (old === '') {
     return { refusal: '"old_string" is empty: an edit needs the text it should replace' };
   }
-  const occurrences = occurrencesOf(hay, old);
+  const occurrences = matchCount(hay, old);
   if (occurrences === 0) {
     return {
       refusal: `"old_string" does not appear in the document as the room holds it (${hay.length} characters)`,
