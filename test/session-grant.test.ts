@@ -1,19 +1,20 @@
 /**
  * The session against a real file system: the walk a host publishes, and the clamp every read of
- * a granted path goes through — including the shape the clamp is not written for, a **directory**
- * that has become a symbolic link out of the folder.
+ * a granted path goes through — including the shapes the clamp is not written for, a **directory**
+ * that has become a symbolic link out of the folder and a **FIFO** at a leaf.
  *
  * The folders are under this checkout's `.tmp/`, never `/tmp`.
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, statSync } from 'node:fs';
-import { readFile, rm, symlink } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { constants, existsSync, renameSync, statSync } from 'node:fs';
+import { open, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { MAX_GRANT_FILE_BYTES } from '../vendor/bridge/index.ts';
-import { enumerateGrant, writeGrantedFile } from '../src/grant.ts';
+import { enumerateGrant, readGrantedFile, writeGrantedFile } from '../src/grant.ts';
 import { Session, SessionRefused } from '../src/session.ts';
 import type { SessionRefusal } from '../src/session.ts';
 import { StubEngine, StubFactory } from './helpers/stub-engine.ts';
@@ -39,6 +40,60 @@ async function hostOver(
   const session = new Session({ engines: factory, documentWaitMs: 200 });
   await session.host({ root, serverUrl: 'ws://room.example', displayName: 'agent' });
   return { session, engine };
+}
+
+/**
+ * A FIFO at `at`, made by `mkfifo` — the one thing here Node has no API for — or the reason this
+ * host could not make one. The child is bounded and killed if it does not answer, so a host
+ * without the command is a step that says so rather than a suite that hangs on it.
+ */
+async function makeFifo(at: string, ms = 5_000): Promise<string | undefined> {
+  return await new Promise((resolve) => {
+    const child = spawn('mkfifo', [at], { stdio: 'ignore' });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve(`mkfifo did not finish within ${ms} ms`);
+    }, ms);
+    child.on('error', (error: Error) => {
+      clearTimeout(timer);
+      resolve(`mkfifo could not be run: ${error.message}`);
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve(code === 0 ? undefined : `mkfifo exited with ${code ?? signal ?? 'no code'}`);
+    });
+  });
+}
+
+/**
+ * What `work` answered within `ms`, or a failure that says it did not answer at all.
+ *
+ * The guard the FIFO tests below are about is that the call cannot wait on another process, so a
+ * call still pending at the deadline is the defect and not a slow host: the bound is the
+ * assertion, and the failure carries what this host could still see of the leaf.
+ */
+async function answeredWithin<T>(
+  what: string,
+  ms: number,
+  work: () => Promise<T>,
+  observed: () => unknown,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `${what} was still pending ${ms} ms later, so the call never returned — which is the wait ` +
+            `this test forbids. What the host can see of it: ${JSON.stringify(observed())}`,
+        ),
+      );
+    }, ms);
+  });
+  try {
+    return await Promise.race([work(), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 test('a host publishes the walk: the excludes, the ignore files and no descent into a link', async () => {
@@ -618,6 +673,133 @@ test('a leaf over the size a session carries is refused, and left as it was', as
       cause: 'too-large',
     });
     assert.equal(statSync(join(root, 'big.txt')).size, MAX_GRANT_FILE_BYTES + 1);
+  } finally {
+    await remove(root);
+  }
+});
+
+/**
+ * A leaf the open is what waits on.
+ *
+ * `open(O_WRONLY)` on a FIFO with no reader blocks until some process reads it, so a write leaf
+ * opened without `O_NONBLOCK` is a write-back that never returns: the room's change is never
+ * applied to the folder and nothing is recorded in `problems`, because the call that would record
+ * it has not come back. The bound here *is* the assertion, and a run that fails it prints what the
+ * host could still see of the leaf.
+ */
+test('a FIFO at a granted path is refused by the write clamp rather than waited on', async (t) => {
+  const root = await scratch('write-fifo');
+  try {
+    const why = await makeFifo(join(root, 'pipe'));
+    if (why !== undefined) {
+      t.skip(`no FIFO could be made here, so the write leaf's guard did not run: ${why}`);
+      return;
+    }
+    assert.deepEqual(
+      await answeredWithin(
+        'a write of a FIFO leaf',
+        2_000,
+        () => writeGrantedFile(root, 'pipe', 'from the room\n'),
+        () => ({ isFIFO: statSync(join(root, 'pipe')).isFIFO() }),
+      ),
+      { kind: 'refused', cause: 'not-a-file' },
+    );
+    assert.equal(statSync(join(root, 'pipe')).isFIFO(), true, 'the refusal changed the leaf');
+
+    // A reader holding the other end means the same open succeeds without the flag. The type is
+    // still what refuses the write, read off the descriptor, so the guard is not what decides.
+    const reader = await open(join(root, 'pipe'), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      assert.deepEqual(await writeGrantedFile(root, 'pipe', 'from the room\n'), {
+        kind: 'refused',
+        cause: 'not-a-file',
+      });
+    } finally {
+      await reader.close();
+    }
+  } finally {
+    await remove(root);
+  }
+});
+
+/**
+ * The read side of the same leaf, which is not given the flag and does not need it.
+ *
+ * `open(O_RDONLY)` on a FIFO with no writer answers rather than waits, so the read's open is not
+ * where a FIFO could block; the type is what refuses it, off the name's own `lstat` and again off
+ * the descriptor, and the bytes are never read. The walk leaves it out for the same reason — a
+ * session carries text files — so a FIFO is not a path this host publishes either.
+ */
+test('a FIFO at a granted path is refused by the read, and the walk does not name it', async (t) => {
+  const root = await scratch('read-fifo');
+  try {
+    const why = await makeFifo(join(root, 'pipe'));
+    if (why !== undefined) {
+      t.skip(`no FIFO could be made here, so the read's verdict on one was not tested: ${why}`);
+      return;
+    }
+    await put(root, 'a.txt', 'a plain file\n');
+    assert.deepEqual(
+      await answeredWithin(
+        'a read of a FIFO leaf',
+        2_000,
+        () => readGrantedFile(root, 'pipe'),
+        () => ({ isFIFO: statSync(join(root, 'pipe')).isFIFO() }),
+      ),
+      { kind: 'refused', cause: 'not-a-file' },
+    );
+    assert.deepEqual((await enumerateGrant(root)).paths, ['a.txt']);
+  } finally {
+    await remove(root);
+  }
+});
+
+/**
+ * The shape the issue names: the leaf is a plain file when the write-back reads it and a FIFO by
+ * the time the write opens it, which is a path component swapped while the write-back is in
+ * flight. The stub's `onText` is that moment — the read has answered and the write has not run —
+ * and the swap is a rename, so the folder is the same one the read accepted.
+ *
+ * What has to be true afterwards is that the session came back: the refusal is in `problems` with
+ * the write's own reason, the room's text did not reach the FIFO, and nothing is left waiting on
+ * the leaf.
+ */
+test('a room change whose leaf becomes a FIFO in flight is refused, and said in problems', async (t) => {
+  const root = await scratch('fifo-swap');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const why = await makeFifo(join(root, 'pipe'));
+    if (why !== undefined) {
+      t.skip(`no FIFO could be made here, so the in-flight swap was not tested: ${why}`);
+      return;
+    }
+    const walked = await enumerateGrant(root);
+    const engine = new StubEngine({
+      role: 'host',
+      invite: INVITE,
+      listing: walked.paths,
+      texts: new Map([['a.txt', 'one\n']]),
+      onText: (path) => {
+        const at = join(root, path);
+        if (path === 'a.txt' && statSync(at).isFile()) {
+          renameSync(join(root, 'pipe'), at);
+        }
+      },
+    });
+    const { session } = await hostOver(root, engine);
+
+    engine.remote('a.txt', 'two\n');
+    engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    const problems = await until(
+      'the write-back to answer',
+      () => session.status().problems,
+      (rows) => rows.length > 0,
+      2_000,
+    );
+    assert.equal(problems[0]?.path, 'a.txt');
+    assert.equal(problems[0]?.cause, 'write-failed');
+    assert.match(problems[0]?.message ?? '', /is not a file this folder will write/);
+    assert.equal(statSync(join(root, 'a.txt')).isFIFO(), true, 'the write-back emptied the leaf');
   } finally {
     await remove(root);
   }
