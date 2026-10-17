@@ -81,6 +81,7 @@ const REFUSALS: Readonly<Record<SessionRefusal, string>> = {
   'room-error': 'the room refused it',
   'write-failed': 'the host folder refused the write',
   'timed-out': 'the room did not send it in time',
+  'no-document': 'this replica holds no document for it',
 };
 
 function refused(error: SessionRefused): CallToolResult {
