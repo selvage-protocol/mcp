@@ -716,3 +716,44 @@ test('session_host carries the cursor choice to the session too', async () => {
     await remove(root);
   }
 });
+
+/**
+ * The notification opt-in is read exactly the way the cursor's is — the argument, then the
+ * variable, then off — because both are read by the same helper. Counting announcements rather
+ * than inspecting the session is what makes this the tool layer's own question.
+ */
+test('notifications are asked for by the argument or the variable, and by nothing else', async () => {
+  const heard = async (
+    args: Record<string, unknown>,
+    env: Record<string, string | undefined> = {},
+  ): Promise<number> => {
+    const engine = guestRoom();
+    let announced = 0;
+    const benchmark = bench({
+      engine,
+      env,
+      session: { grantWaitMs: 0, notify: () => (announced += 1) },
+    });
+    await call(benchmark, 'session_join', { invite: INVITE, ...args });
+    await call(benchmark, 'read_file', { path: 'a.txt' });
+    engine.remote('a.txt', 'two\n');
+    engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    return announced;
+  };
+
+  assert.equal(await heard({}), 0, 'a default join announced a change');
+  assert.equal(await heard({ notify_changes: true }), 1);
+  assert.equal(await heard({}, { SELVAGE_NOTIFY_CHANGES: 'on' }), 1);
+
+  // The variable is the fallback, so an argument beats it — an explicit `false` included.
+  assert.equal(await heard({ notify_changes: false }, { SELVAGE_NOTIFY_CHANGES: '1' }), 0);
+
+  // The same off spellings the cursor variable takes, and a value that is neither on nor off.
+  for (const value of ['0', 'false', 'no', 'off', 'maybe', '']) {
+    assert.equal(
+      await heard({}, { SELVAGE_NOTIFY_CHANGES: value }),
+      0,
+      `${JSON.stringify(value)} is not on`,
+    );
+  }
+});
