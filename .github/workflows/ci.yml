@@ -42,18 +42,34 @@ jobs:
       - run: npm run typecheck
 
       # The suite the server's own processes can run. The two-process proof — two MCP servers
-      # over their stdio, editing one room on a real `selvaged` — needs a built binary from the
-      # sibling `reference_server` repository, which this job does not check out; `npm run
-      # test:e2e` runs it, and `scripts/ci-local.sh e2e` runs it with the checkout's own gates.
-      # `test/packed.test.ts` packs this repository, installs the tarball outside it and drives
-      # the installed command, which needs npm and no network beyond what `npm ci` already did.
-      # The flake's checks — and the `pre-commit` hook set it installs — need Nix, which this job
-      # does not set up; `scripts/ci-local.sh checks` runs those on a machine that has it.
+      # over their stdio, editing one room on a real `selvaged` — is the pair of steps below this
+      # one. `test/packed.test.ts` packs this repository, installs the tarball outside it and
+      # drives the installed command, which needs npm and no network beyond what `npm ci` already
+      # did. The flake's checks — and the `pre-commit` hook set it installs — need Nix, which this
+      # job does not set up; `scripts/ci-local.sh checks` runs those on a machine that has it.
       - run: npm test
 
+      # The two-process proof, which needs a real `selvaged` and no sibling `reference_server`
+      # checkout to build one from. It takes the published one instead: the image is a static
+      # binary on `scratch`, so `scripts/fetch-selvaged.sh` reads it off the registry anonymously
+      # in about a second, with no `docker`, no Rust toolchain and no cache between the proof and
+      # the bytes. The script pins the release commit, checks each layer against the digest its
+      # manifest carries, and refuses a binary that does not print the version its tag names — so
+      # a fetch that cannot happen is a red step named here, never a proof that did not run.
+      # `$RUNNER_TEMP` is the runner's own scratch directory, not this host's RAM-backed `/tmp`.
+      - name: fetch the published selvaged
+        run: scripts/fetch-selvaged.sh "$RUNNER_TEMP/selvaged"
+
+      # The same command `scripts/ci-local.sh e2e` runs, with the fetched binary named the way
+      # `test/helpers/selvaged.ts` looks for one. `SELVAGE_SELVAGED` is on this step alone, so
+      # nothing above is proved against a server that is not there yet.
+      - name: the two-process proof
+        env:
+          SELVAGE_SELVAGED: ${{ runner.temp }}/selvaged/selvaged
+        run: npm run test:e2e
+
       # The runner has no nix, so the pinned lychee release is installed here and the link check
-      # takes it from PATH; `$RUNNER_TEMP` is the runner's own scratch directory, not this host's
-      # RAM-backed `/tmp`.
+      # takes it from PATH.
       - name: install lychee
         run: |
           curl -fsSL -o "$RUNNER_TEMP/lychee.tar.gz" \
