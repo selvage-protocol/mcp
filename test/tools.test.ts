@@ -11,16 +11,18 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { encodeKey } from '../vendor/engine/index.ts';
 import { ToolRegistry } from '../src/registry.ts';
 import type { CallToolResult, ToolDefinition } from '../src/registry.ts';
 import { Session } from '../src/session.ts';
 import type { SessionOptions } from '../src/session.ts';
 import { createSessionTools, MAX_WAIT_MS } from '../src/tools.ts';
+import { clientAcceptsPageLink } from './helpers/page-link.ts';
 import { StubEngine, StubFactory, peer } from './helpers/stub-engine.ts';
 import { TMP, put, remove, scratch } from './helpers/scratch.ts';
 
 /** A link of the shape §5.1 writes: the page's or the wire's, with both keys in the fragment. */
-const INVITE = `ws://room.example/session?room=room-1&token=tok-1#k=${'a'.repeat(43)}&h=${'b'.repeat(43)}`;
+const INVITE = `ws://room.example/session?room=room-1&token=tok-1#k=${encodeKey(new Uint8Array(32).fill(1))}&h=${encodeKey(new Uint8Array(32).fill(2))}`;
 
 interface Bench {
   readonly tools: readonly ToolDefinition[];
@@ -108,7 +110,7 @@ test('the surface is ten tools whose schemas register, each with a name and a de
   }
 });
 
-test('hosting answers with the room, the complete invite and the granted path count', async () => {
+test('hosting answers with the room, both links to it, and the granted path count', async () => {
   const root = await scratch('tools-host');
   try {
     await put(root, 'a.txt', 'one\n');
@@ -126,6 +128,31 @@ test('hosting answers with the room, the complete invite and the granted path co
     assert.match(text, /2 granted path\(s\)/);
     assert.equal(benchmark.factory.hosted.length, 1);
     assert.equal(benchmark.factory.hosted[0]?.displayName, 'agent');
+  } finally {
+    await remove(root);
+  }
+});
+
+test('the page link session_host answers is one the browser client accepts', async () => {
+  const root = await scratch('tools-page-link');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const result = await call(bench(undefined), 'session_host', {
+      folder: root,
+      server_url: 'ws://room.example',
+    });
+    assert.equal(result.isError, undefined, textOf(result));
+    const text = textOf(result);
+    const page = /^page: (\S+)/m.exec(text)?.[1];
+    assert.ok(page !== undefined, `no page link was answered: ${text}`);
+    // The client's own decision, not a prefix check: the query names the room and token and the
+    // fragment reads as §5.1's two keys, so the link opens the room the invite names.
+    const read = clientAcceptsPageLink(page);
+    assert.ok(read !== undefined, `the browser client would refuse ${page}`);
+    assert.equal(read.room, 'room-1');
+    assert.equal(read.token, 'tok-1');
+    // And the invite the same answer carries is the client form the engine minted.
+    assert.ok(text.includes(INVITE), `the client invite changed: ${text}`);
   } finally {
     await remove(root);
   }
