@@ -271,6 +271,8 @@ export class Session {
   private readonly problemLimit: number;
   private readonly listing = new Listing();
   private readonly problems: SessionProblem[] = [];
+  /** The seed in flight per path, so a second ask for one joins it rather than reading again. */
+  private readonly seeding = new Map<string, Promise<void>>();
 
   private engine: SessionEngine | undefined;
   private mode: Mode | undefined;
@@ -403,6 +405,7 @@ export class Session {
     this.cut = undefined;
     this.live = false;
     this.problems.length = 0;
+    this.seeding.clear();
     try {
       if (mode === 'host') {
         await engine.closeRoom();
@@ -571,6 +574,7 @@ export class Session {
     this.cut = cut;
     this.live = true;
     this.problems.length = 0;
+    this.seeding.clear();
     engine.on((event) => {
       this.noteEvent(event);
     });
@@ -674,6 +678,15 @@ export class Session {
   /**
    * Puts this folder's text for `path` into the room, which is what a hold on a path nothing has
    * arrived for is asking for. A guest does nothing here: it has no folder to answer from.
+   *
+   * One seed per path at a time. The room can ask for the same path twice while the first ask is
+   * still reading the folder — the hold this process itself just took comes back as the room's
+   * open set, and a `documentsChanged` and an `awaitDocument` for one path are two callers of
+   * this. The `engine.has` check and the insertion below are a check-then-act across
+   * `readGrantedFile`'s await, so without the map both callers would find no document and each
+   * insert the whole file, doubling the room's text; a second ask joins the seed already in
+   * flight instead. The insertion lands in the replica before the call returns, so a completed
+   * seed needs no memory of its own — the next ask is answered by `engine.has`.
    */
   private async seedDocument(path: string): Promise<void> {
     const engine = this.requireLive('seeding a document');
@@ -681,6 +694,24 @@ export class Session {
     if (root === undefined || engine.has(path)) {
       return;
     }
+    const inFlight = this.seeding.get(path);
+    if (inFlight !== undefined) {
+      await inFlight;
+      return;
+    }
+    const seed = this.readAndSeed(engine, root, path);
+    this.seeding.set(path, seed);
+    try {
+      await seed;
+    } finally {
+      if (this.seeding.get(path) === seed) {
+        this.seeding.delete(path);
+      }
+    }
+  }
+
+  /** The folder read and the one insertion a seed is, shared by every ask that joined it. */
+  private async readAndSeed(engine: SessionEngine, root: string, path: string): Promise<void> {
     const read = await readGrantedFile(root, path);
     if (read.kind === 'refused') {
       throw new SessionRefused(read.cause, `${path} is in the room's open set and the grant will not read it`);
