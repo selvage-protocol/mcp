@@ -51,6 +51,15 @@ export function peer(
 export interface StubOptions {
   readonly roomId?: string;
   readonly role?: Role;
+  /**
+   * Whether a state has committed this seat's own key yet (`§13.1`'s step 4). `false` is a
+   * connection that has announced and is waiting to be committed, which is what a hold taken in
+   * that window is held behind: `appliedRole` answers `undefined` for it while `role` still
+   * answers the role the state is expected to give.
+   */
+  readonly committed?: boolean;
+  /** The room's advertised clocks (`§8.2`), which a wait the room bounds is read off. */
+  readonly keepalive?: SessionInfo['keepalive'];
   readonly invite?: string | undefined;
   readonly listing?: readonly string[];
   readonly documents?: readonly string[];
@@ -85,6 +94,9 @@ export class StubEngine implements SessionEngine {
   peers: readonly PeerInfo[];
   presenceList: readonly Presence[];
   connected = true;
+  /** Whether the room has committed this seat's key yet; a test moves it as a state would. */
+  committed: boolean;
+  keepalive: SessionInfo['keepalive'];
 
   private readonly listeners = new Set<EngineEventListener>();
   private readonly onOpen: ((path: string, engine: StubEngine) => void) | undefined;
@@ -94,6 +106,12 @@ export class StubEngine implements SessionEngine {
   constructor(options: StubOptions = {}) {
     this.roomId = options.roomId ?? 'room-1';
     this.role = options.role ?? 'guest';
+    this.committed = options.committed ?? true;
+    this.keepalive = options.keepalive ?? {
+      ping_interval_ms: 15_000,
+      awareness_renew_ms: 5_000,
+      awareness_expire_ms: 15_000,
+    };
     this.invite = options.invite;
     this.listing = [...(options.listing ?? [])];
     this.documents = [...(options.documents ?? [])];
@@ -114,9 +132,13 @@ export class StubEngine implements SessionEngine {
       peers: [...this.peers],
       documents: [...this.documents],
       capabilities: [],
-      keepalive: { ping_interval_ms: 15_000, awareness_renew_ms: 5_000, awareness_expire_ms: 15_000 },
+      keepalive: { ...this.keepalive },
       baseUrl: BASE as SessionBase,
     };
+  }
+
+  appliedRole(): Role | undefined {
+    return this.committed ? this.role : undefined;
   }
 
   text(path: string): string {
