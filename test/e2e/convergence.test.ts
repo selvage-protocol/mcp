@@ -171,6 +171,60 @@ test('two MCP servers converge on one room through a real selvaged', { timeout: 
 });
 
 /**
+ * A host's own first read of a shared path, with a guest in the room. The read takes a hold, and
+ * the room answering that it now holds the path is the event that seeds it — while the read itself
+ * is seeding the same path from the folder. Both insert the whole file unless one seed is
+ * remembered as in flight, and the room then holds the file's text twice. Nothing here edits
+ * anything: the doubling was observed in a live session before any edit succeeded, and the first
+ * edit refused was refused because the document already held its text twice.
+ */
+test('a host holds a shared path once when its own read seeds it', { timeout: STEP_MS * 2 }, async (t) => {
+  const selvaged = await RealSelvaged.start();
+  t.after(async () => {
+    await selvaged.stop();
+  });
+
+  const hostFolder = await scratch('e2e-seed-host');
+  const guestFolder = await scratch('e2e-seed-guest');
+  const body = 'FizzBuzz, with one branch\nsecond line here\n';
+  const paths = ['one.txt', 'two.txt', 'three.txt'];
+  for (const path of paths) {
+    await put(hostFolder, path, body);
+  }
+
+  const host = await Tool.start(t, 'host', {
+    cwd: hostFolder,
+    env: { ...process.env, SELVAGE_SERVER_URL: selvaged.wsBase, SELVAGE_DISPLAY_NAME: 'ada' },
+  });
+  const guest = await Tool.start(t, 'guest', {
+    cwd: guestFolder,
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'grace' },
+  });
+
+  const hosted = await host.call('session_host', { folder: hostFolder });
+  const room = roomIdOf(hosted);
+  const joined = await guest.call('session_join', { invite: inviteOf(hosted) });
+  assert.ok(joined.includes(room), `the guest joined another room: ${joined}`);
+  await until(
+    'the host to see the guest',
+    () => host.raw('session_status'),
+    (text) => /^participants: 2$/m.test(text),
+    STEP_MS,
+  );
+
+  // Nothing has opened these paths, so the room holds no document for them: the first read is
+  // the read that meets the hold's own echo. Each answer is the whole assertion — a room holding
+  // the file twice answers with it twice — and the second pass reads back what the first left.
+  for (const path of paths) {
+    const text = await host.call('read_file', { path });
+    assert.equal(text, body, `the room holds ${path} as something other than the file text`);
+  }
+  for (const path of paths) {
+    assert.equal(await host.call('read_file', { path }), body, `the room multiplied ${path}`);
+  }
+});
+
+/**
  * The proof is required, so the two ways of not having a server are failures with something to
  * act on rather than skips: a binary that is not there names the command that builds one, and a
  * binary that will not listen names what it did say instead of leaving a wait to run out.
