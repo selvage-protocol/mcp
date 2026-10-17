@@ -63,6 +63,11 @@ test('hosting hands the folder to the engine, reports the room and answers with 
     assert.equal(hosted.roomId, 'room-1');
     assert.equal(hosted.role, 'host');
     assert.equal(hosted.inviteUrl, INVITE);
+    // The same room, token and fragment over the browser's scheme, at the page's root.
+    assert.equal(
+      hosted.pageUrl,
+      `http://room.example/?room=room-1&token=tok-1#k=${'a'.repeat(43)}&h=${'b'.repeat(43)}`,
+    );
     // The walk's own listing, sorted, with the excludes, the ignore file and the repository
     // exclude all applied — and nothing above the folder read (`core.excludesFile` is not asked).
     assert.deepEqual(hosted.paths, ['.gitignore', 'a.txt', 'src/kept.txt']);
