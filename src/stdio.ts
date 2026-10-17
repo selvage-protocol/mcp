@@ -228,8 +228,9 @@ export async function serve(server: Server, io: TransportIO): Promise<void> {
     io.input.on('error', failed);
   });
 
-  // A task can start another (nothing here does, but a handler is free to), so the loop drains
-  // until nothing is left rather than awaiting one snapshot of the set.
+  // Every task started here is awaited before returning, so nothing this process owned is still
+  // in flight when the client's close ends it. The set is re-read rather than trusted as one
+  // snapshot; nothing here starts a task from inside another, so it cannot spin.
   for (;;) {
     const pending = [...outstanding];
     if (pending.length === 0) {
