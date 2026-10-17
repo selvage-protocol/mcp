@@ -80,11 +80,16 @@
     # Node and the hook set above. The Node is a named version rather than whatever the host
     # happens to have: it is the one `package.json`'s `engines` promises and the one the
     # checks below run on.
+    # Node and the hook set above, plus what `scripts/fetch-selvaged.sh` reads the published
+    # `selvaged` with: the gate's `e2e` step runs in this shell, so the shell carries them rather
+    # than depending on the host having them.
     devShells = forAllSelvage (pkgs: selvage: {
       default = pkgs.mkShell {
         packages =
           [
             selvage.node
+            pkgs.curl
+            pkgs.python3
           ]
           ++ selvage.hooks.enabledPackages;
 
@@ -134,9 +139,10 @@
           "head -n 1 dist/main.js | grep -q '^#!/usr/bin/env node$'"
         ];
 
-        # `npm test` and not `npm run test:e2e` beside it: the two-process proof needs a built
-        # `selvaged` from the sibling `reference_server` repository, and a sandbox has no sibling
-        # checkout. `scripts/ci-local.sh e2e`, from a checkout that has one, runs it.
+        # `npm test` and not `npm run test:e2e` beside it: the two-process proof needs a real
+        # `selvaged`, and a sandbox has neither a sibling `reference_server` checkout to build one
+        # from nor the network `scripts/fetch-selvaged.sh` reads the published one over.
+        # `scripts/ci-local.sh e2e` runs it, from a checkout that has both.
         #
         # The build comes first because a checkout gets it from `npm ci`, which runs `prepare`,
         # and this derivation gets its `node_modules` from the store instead of from an install:

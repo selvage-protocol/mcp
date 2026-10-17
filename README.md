@@ -232,8 +232,9 @@ artifact is not in the tarball.
 `npm run test:e2e` is the proof rather than the exercise: two MCP servers over their real stdio,
 editing one room on a real `selvaged`, converging in both directions. It **fails** rather than
 skipping when there is no server binary, naming the command that builds one, and finds the binary
-through `SELVAGE_SELVAGED` or as a sibling `reference_server`'s build. CI does not run it, because
-the runner has no such checkout; `scripts/ci-local.sh e2e` does.
+through `SELVAGE_SELVAGED` or as a sibling `reference_server`'s build. The runner has no such
+checkout, so CI and `scripts/ci-local.sh e2e` both take the published binary from its image
+instead — `scripts/fetch-selvaged.sh`, a second of network — and name it in `SELVAGE_SELVAGED`.
 
 `nix develop . --max-jobs 2 -c ./scripts/ci-local.sh all` runs this checkout's whole gate: lint,
 checks, e2e, links.

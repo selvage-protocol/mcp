@@ -4,17 +4,19 @@
 # has no Docker or Podman, so `act` cannot run here).
 #
 #   scripts/ci-local.sh checks   # the `checks` job: install, build, typecheck, the server's suite
-#   scripts/ci-local.sh e2e      # the two-process proof: two MCP servers over stdio, one room on a
-#                                # real `selvaged`, which the runner has none of
+#   scripts/ci-local.sh e2e      # the two-process proof: two MCP servers over stdio, one room on
+#                                # a real `selvaged` — the published binary, fetched as the job does
 #   scripts/ci-local.sh lint     # actionlint over the workflow files
 #   scripts/ci-local.sh links    # lychee over README.md: every relative link and every URL the
 #                                # reader-facing prose carries
 #   scripts/ci-local.sh all      # lint + checks + e2e + links
 #
-# Keep `checks`, `lint` and `links` in step with the workflow — they run the same commands, so that
-# a red job is found here rather than on a runner. `e2e` is the one step the runner does not run,
-# and the workflow says why: it needs a built `selvaged` from the sibling `reference_server`
-# repository, which that job does not check out.
+# Keep `checks`, `lint`, `links` and `e2e` in step with the workflow — they run the same commands,
+# so that a red job is found here rather than on a runner. `e2e` is the one step whose server the
+# job gets in a step of its own: the runner has no sibling `reference_server` checkout, so both
+# call `scripts/fetch-selvaged.sh` for the published binary and then `npm run test:e2e`. A
+# `SELVAGE_SELVAGED` already in the environment names a different server — a sibling build — and
+# skips the fetch.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -52,8 +54,13 @@ job_checks() {
 }
 
 job_e2e() {
+  local binary=${SELVAGE_SELVAGED:-}
+  if [ -z "$binary" ]; then
+    say "e2e: the published selvaged"
+    binary=$(scripts/fetch-selvaged.sh)
+  fi
   say "e2e: two MCP servers and a real selvaged"
-  npm run test:e2e
+  SELVAGE_SELVAGED=$binary npm run test:e2e
 }
 
 job_lint() {
