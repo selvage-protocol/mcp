@@ -103,21 +103,26 @@ class StreamWriter {
   }
 
   /**
-   * The write callback is what makes this ordered under backpressure: it fires when the chunk is
-   * flushed, so the next message is not handed to the stream until this one has left.
+   * One message at a time, in the order this was handed them. The write callback is what orders
+   * it: it fires when the chunk is flushed, so the next `output.write` is not reached until this
+   * one has left, and two handlers finishing at once cannot land inside one line. The queue is
+   * what an unsolicited notification goes through too, so a notification emitted while a response
+   * is on its way is still one whole line on the stream.
    */
   write(message: JsonRpcMessage): Promise<void> {
     const line = encode(message);
-    const write = new Promise<void>((resolve, reject) => {
-      this.output.write(line, (error) => {
-        if (error === null || error === undefined) {
-          resolve();
-        } else {
-          reject(error);
-        }
-      });
-    });
-    const next = this.queue.then(() => write);
+    const next = this.queue.then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          this.output.write(line, (error) => {
+            if (error === null || error === undefined) {
+              resolve();
+            } else {
+              reject(error);
+            }
+          });
+        }),
+    );
     // A failed write is reported to the caller that awaits it; the chain itself keeps going so
     // that one closed pipe does not leave the messages behind it unreported too.
     this.queue = next.catch(() => undefined);
@@ -139,12 +144,16 @@ export interface TransportIO {
 }
 
 /**
- * Answers every message on `input` until it ends, then returns. Messages are handled one at a
- * time and in the order they arrived, so a response cannot overtake the one before it.
+ * Answers every message on `input` until it ends, then returns. Each message is dispatched as its
+ * own task rather than awaited in the read loop, which is what lets a request that blocks — a
+ * `wait_for_change` held to its deadline — be answered beside another rather than in front of it.
+ * Dispatch itself is still in arrival order, so the lifecycle gate sees an `initialize` before the
+ * messages that follow it, and the ordering beyond that is the session's own: `Session` serializes
+ * its mutations, per path and as a whole, so two edits cannot interleave into a torn document.
  *
  * End of input *is* the shutdown: `2025-11-25/basic/lifecycle.mdx` has the client close stdin and
- * then wait for the process to exit, so returning here — with every write it still owned flushed —
- * is the whole of it.
+ * then wait for the process to exit, so returning here — with every task it still owned finished
+ * and every write it still owned flushed — is the whole of it.
  */
 export async function serve(server: Server, io: TransportIO): Promise<void> {
   const writer = new StreamWriter(io.output);
@@ -153,14 +162,22 @@ export async function serve(server: Server, io: TransportIO): Promise<void> {
       io.diagnostic(`writing a notification: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
-  let queue: Promise<void> = Promise.resolve();
+  // Every task started here, so that the return below cannot leave one in flight. A rejected task
+  // is remembered rather than thrown from an event handler, and reported once the loop is done.
+  const outstanding = new Set<Promise<void>>();
   let failure: unknown;
 
   const run = (work: () => Promise<void>): void => {
-    queue = queue.then(work).catch((error: unknown) => {
-      if (failure === undefined) {
-        failure = error;
-      }
+    const started = Promise.resolve()
+      .then(work)
+      .catch((error: unknown) => {
+        if (failure === undefined) {
+          failure = error;
+        }
+      });
+    outstanding.add(started);
+    void started.then(() => {
+      outstanding.delete(started);
     });
   };
 
@@ -211,7 +228,15 @@ export async function serve(server: Server, io: TransportIO): Promise<void> {
     io.input.on('error', failed);
   });
 
-  await queue;
+  // A task can start another (nothing here does, but a handler is free to), so the loop drains
+  // until nothing is left rather than awaiting one snapshot of the set.
+  for (;;) {
+    const pending = [...outstanding];
+    if (pending.length === 0) {
+      break;
+    }
+    await Promise.all(pending);
+  }
   if (failure !== undefined) {
     throw failure;
   }

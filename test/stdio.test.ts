@@ -10,6 +10,8 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { ENTRY, StdioServer, assertMessagesOnly } from './helpers/stdio-client.ts';
@@ -44,6 +46,35 @@ const INITIALIZED = { jsonrpc: '2.0', method: 'notifications/initialized' };
 
 function ping(id: number): unknown {
   return { jsonrpc: '2.0', id, method: 'ping' };
+}
+
+/** One `tools/call`, as a client writes it. */
+function call(id: number, name: string, args: Record<string, unknown> = {}): unknown {
+  return { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } };
+}
+
+/** The one text block these tools answer with. */
+function textOf(result: unknown): string {
+  const shape = result as { readonly content?: readonly { readonly text?: unknown }[] };
+  return String(shape.content?.[0]?.text ?? '');
+}
+
+/**
+ * A live host session over the stub engine, with one file in its folder: the state a held
+ * `wait_for_change` blocks in. `live-engine.ts` is the preload that makes the session real.
+ */
+async function hostedServer(t: TestContext): Promise<{ readonly server: StdioServer; readonly folder: string }> {
+  const server = StdioServer.startCommand(process.execPath, ['--import', LIVE_ENGINE, ENTRY]);
+  t.after(() => server.stop());
+  const folder = await scratch('stdio-concurrent');
+  t.after(() => remove(folder));
+  await put(folder, 'a.txt', 'one\n');
+  server.send(initialize(1, '2025-11-25'));
+  await server.nextResult(1, 'the initialize result');
+  server.send(call(2, 'session_host', { folder, server_url: 'ws://room.example' }));
+  const hosted = (await server.nextResult(2, 'the session_host result')) as { readonly isError?: unknown };
+  assert.equal(hosted.isError, undefined, server.report());
+  return { server, folder };
 }
 
 test('initialize answers with the negotiated version, the tool capability and its own name', async (t) => {
@@ -409,4 +440,106 @@ test('a room that never answers is bounded, and the process still follows its cl
   const exit = await server.close();
   assert.deepEqual(exit, { code: 1, signal: null }, server.report());
   await server.waitForDiagnostic('the room did not answer within 2000 ms', 'the bound diagnostic');
+});
+
+
+test('a request beside a held wait is answered while the wait is still blocking', async (t) => {
+  // The defect: the read loop awaited each message before reading the next, so a wait held every
+  // other call until its own deadline. A status question has to be answerable beside a wait.
+  const { server } = await hostedServer(t);
+  const waitMs = 2_500;
+  server.send(call(3, 'wait_for_change', { paths: ['a.txt'], timeout_ms: waitMs }));
+
+  const started = Date.now();
+  server.send(call(4, 'session_status'));
+  const status = (await server.nextResult(4, 'the status answered while a wait is held', 1_000)) as {
+    readonly isError?: unknown;
+  };
+  const answeredIn = Date.now() - started;
+  assert.equal(status.isError, undefined, JSON.stringify(status));
+  assert.match(textOf(status), /room-1/, 'the status reports the room the wait is held in');
+  assert.ok(
+    answeredIn < waitMs,
+    `the status arrived at ${answeredIn} ms, which is behind the ${waitMs} ms wait: ${server.report()}`,
+  );
+
+  // The request beside it neither extended nor cancelled the wait: the wait keeps its own deadline.
+  const held = await server.nextResult(3, 'the held wait returning at its deadline', waitMs + 2_000);
+  assert.match(textOf(held), new RegExp(`^no change within ${waitMs} ms`), textOf(held));
+  await server.close();
+});
+
+test('a document change beside a held wait is applied, not queued behind it', async (t) => {
+  const { server, folder } = await hostedServer(t);
+  const waitMs = 2_500;
+  server.send(call(3, 'wait_for_change', { paths: ['a.txt'], timeout_ms: waitMs }));
+
+  server.send(call(4, 'edit_file', { path: 'a.txt', old_string: 'one', new_string: 'ONE' }));
+  const edit = (await server.nextResult(4, 'the edit answered while a wait is held', 1_000)) as {
+    readonly isError?: unknown;
+  };
+  assert.equal(edit.isError, undefined, JSON.stringify(edit));
+  assert.match(textOf(edit), /1 replacement/, textOf(edit));
+  // Published before the wait's deadline: a host's own edit is written back to the folder its
+  // session holds, which is where the change this process made is visible from here.
+  assert.equal(await readFile(join(folder, 'a.txt'), 'utf8'), 'ONE\n');
+
+  // This seat's own edit is not a change to report back to it, so the wait still ends on its clock.
+  const held = await server.nextResult(3, 'the held wait returning at its deadline', waitMs + 2_000);
+  assert.match(textOf(held), new RegExp(`^no change within ${waitMs} ms`), textOf(held));
+  await server.close();
+});
+
+test('two waits in flight at once, with a notification beside them, leave stdout whole', async (t) => {
+  // Two handlers that finish at the same moment, one that finishes at once, and the two opt-in
+  // notifications the room announces while all three are on the stream. Every line has to be one
+  // whole message: nothing may be written inside another handler's line.
+  const server = StdioServer.startCommand(process.execPath, ['--import', LIVE_ENGINE, ENTRY], {
+    env: { ...process.env, SELVAGE_TEST_ENGINE_ANNOUNCE: 'a.txt' },
+  });
+  t.after(() => server.stop());
+  const folder = await scratch('stdio-concurrent-framing');
+  t.after(() => remove(folder));
+  await put(folder, 'a.txt', 'one\n');
+  server.send(initialize(1, '2025-11-25'));
+  await server.nextResult(1, 'the initialize result');
+  server.send(call(2, 'session_host', { folder, server_url: 'ws://room.example', notify_changes: true }));
+  await server.nextResult(2, 'the session_host result');
+
+  const waitMs = 1_500;
+  // `b.txt` is what the waits watch, so the room's announcement of `a.txt` does not wake them:
+  // the notifications land while both waits are still blocking.
+  server.send(call(3, 'wait_for_change', { paths: ['b.txt'], timeout_ms: waitMs }));
+  server.send(call(4, 'wait_for_change', { paths: ['b.txt'], timeout_ms: waitMs }));
+  server.send(ping(5));
+
+  // Collected by what each line is, not by the order it arrives in: which of the two waits is
+  // written first is the clock's business, and the notifications are the room's own timing.
+  const responses = new Map<number, string>();
+  const notifications: Record<string, unknown>[] = [];
+  while (responses.size < 3 || notifications.length < 2) {
+    const line = await server.nextLine('the next message', 5_000);
+    const message = JSON.parse(line) as {
+      readonly id?: number;
+      readonly method?: string;
+      readonly result?: unknown;
+    };
+    if (message.method === 'notifications/message') {
+      notifications.push(message);
+      continue;
+    }
+    assert.ok(typeof message.id === 'number', line);
+    responses.set(message.id, textOf(message.result));
+  }
+  assert.match(responses.get(3) ?? '', new RegExp(`^no change within ${waitMs} ms`), String(responses.get(3)));
+  assert.match(responses.get(4) ?? '', new RegExp(`^no change within ${waitMs} ms`), String(responses.get(4)));
+  assert.equal(responses.get(5), '', 'the ping answers an empty result, which has no text block');
+  assert.deepEqual(
+    notifications.map((one) => (one['params'] as { readonly data?: Record<string, unknown> })?.data?.['path']),
+    ['a.txt', 'a.txt'],
+  );
+
+  const messages = assertMessagesOnly(server.rawStdout());
+  assert.equal(messages.length, 7, server.report());
+  await server.close();
 });
