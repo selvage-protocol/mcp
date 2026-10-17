@@ -130,6 +130,12 @@ export interface TransportIO {
   readonly output: Writable;
   /** Where a message this server would not answer, or could not, is reported. Never stdout. */
   readonly diagnostic: (message: string) => void;
+  /**
+   * Called once, with a way to write an unsolicited message in the same order as responses, so a
+   * session can tell its client about the room without being asked. The write goes through the
+   * same queue as a response and never carries a request.
+   */
+  readonly onWriter?: (write: (message: JsonRpcMessage) => void) => void;
 }
 
 /**
@@ -142,6 +148,11 @@ export interface TransportIO {
  */
 export async function serve(server: Server, io: TransportIO): Promise<void> {
   const writer = new StreamWriter(io.output);
+  io.onWriter?.((message) => {
+    void writer.write(message).catch((error: unknown) => {
+      io.diagnostic(`writing a notification: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  });
   let queue: Promise<void> = Promise.resolve();
   let failure: unknown;
 

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { Session, SessionRefused } from '../src/session.ts';
-import type { SessionRefusal } from '../src/session.ts';
+import type { Activity, SessionRefusal } from '../src/session.ts';
 import { StubEngine, StubFactory, peer } from './helpers/stub-engine.ts';
 import { put, remove, scratch } from './helpers/scratch.ts';
 import { until } from './helpers/until.ts';
@@ -241,7 +241,7 @@ test('participants carry the room\'s names and roles, and awareness only where i
 
   assert.deepEqual(session.participants(), [
     { peerId: 'p-self', displayName: 'agent', role: 'guest', aware: false, self: true },
-    { peerId: 'p-ada', displayName: 'ada', role: 'host', aware: true, self: false },
+    { peerId: 'p-ada', displayName: 'ada', role: 'host', aware: true, self: false, path: 'a.txt' },
   ]);
   // Identity is published and a cursor is not: the only awareness call a session makes is none.
   assert.deepEqual(engine.calls.filter((call) => call.startsWith('setSelection')), []);
@@ -595,5 +595,56 @@ test('with the cursor off a read and an edit publish nothing at all', async () =
       (call) => call.startsWith('setSelection') || call.startsWith('setAwareness'),
     ),
     [],
+  );
+});
+
+/**
+ * Both opt-ins on one session, which is the combination the two features actually offer: the
+ * caret follows this seat's edit, and the loop accounts for that same edit, so the wait reports
+ * the room's next change as a hunk against it rather than echoing the edit back.
+ */
+test('with the cursor and notifications both on, an edit publishes a caret and the wait reports the room', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+  });
+  const activities: Activity[] = [];
+  const session = new Session({
+    engines: new StubFactory(engine),
+    notify: (activity) => activities.push(activity),
+  });
+  await session.join({
+    invite: INVITE,
+    displayName: 'agent',
+    publishCursor: true,
+    notifyChanges: true,
+  });
+
+  await session.edit('a.txt', { start: 0, end: 3, text: '1' });
+
+  // The caret followed the edit: `one` became `1`, so the change is [0, 1) and its end is 1.
+  assert.deepEqual(
+    engine.calls.filter((call) => call.startsWith('setSelection')),
+    ['setSelection a.txt 1..1'],
+  );
+
+  // The loop accounted for that same edit as this seat's own, so the wait has no echo of it to
+  // give: the hunk is diffed against what the edit left, not against the text before it.
+  const waiting = session.waitForChange({ timeoutMs: 1_000 });
+  engine.remote('a.txt', '1 two!\n');
+  engine.emit({ type: 'documentChanged', path: 'a.txt' });
+  const report = await waiting;
+
+  assert.equal(report.timedOut, false);
+  assert.deepEqual(report.changes.map((change) => change.path), ['a.txt']);
+  assert.equal(report.changes[0]?.kind, 'changed');
+  assert.deepEqual(report.changes[0]?.hunk, ['-    1 1 two', '+    1 1 two!']);
+
+  // The same room change went out on the notification channel, and announcing it did not consume
+  // the change the wait owed.
+  assert.deepEqual(
+    activities.map((activity) => activity.kind),
+    ['document'],
   );
 });

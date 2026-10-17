@@ -67,6 +67,11 @@ export interface StubOptions {
   readonly self?: PeerInfo;
   readonly peers?: readonly PeerInfo[];
   readonly presence?: readonly Presence[];
+  /**
+   * Where a test gives a peer's anchors a place in the document this replica holds. Absent is a
+   * replica that cannot resolve them, which is the ordinary case for a peer that has moved on.
+   */
+  readonly resolveSelection?: (path: string, selection: Selection) => OffsetSelection | undefined;
   /** Called by `open`, which is where a test lets the room's text arrive — or does not. */
   readonly onOpen?: (path: string, engine: StubEngine) => void;
   /**
@@ -102,6 +107,7 @@ export class StubEngine implements SessionEngine {
   private readonly onOpen: ((path: string, engine: StubEngine) => void) | undefined;
   private readonly onHas: ((path: string, engine: StubEngine) => void) | undefined;
   private readonly onText: ((path: string, engine: StubEngine) => void) | undefined;
+  private readonly resolve: ((path: string, selection: Selection) => OffsetSelection | undefined) | undefined;
 
   constructor(options: StubOptions = {}) {
     this.roomId = options.roomId ?? 'room-1';
@@ -122,6 +128,7 @@ export class StubEngine implements SessionEngine {
     this.onOpen = options.onOpen;
     this.onHas = options.onHas;
     this.onText = options.onText;
+    this.resolve = options.resolveSelection;
   }
 
   session(): SessionInfo {
@@ -185,8 +192,8 @@ export class StubEngine implements SessionEngine {
     return [...this.presenceList];
   }
 
-  resolveSelection(_path: string, _selection: Selection): OffsetSelection | undefined {
-    return undefined;
+  resolveSelection(path: string, selection: Selection): OffsetSelection | undefined {
+    return this.resolve?.(path, selection);
   }
 
   on(listener: EngineEventListener): () => void {

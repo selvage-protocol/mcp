@@ -32,6 +32,8 @@ import {
   result,
 } from './jsonrpc.ts';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './jsonrpc.ts';
+import { LOG_LEVELS } from './notify.ts';
+import type { LoggingControl } from './notify.ts';
 import { ToolRegistry } from './registry.ts';
 import type { ToolDescription } from './registry.ts';
 
@@ -61,6 +63,11 @@ export interface ServerOptions {
   readonly serverInfo: ServerInfo;
   readonly registry?: ToolRegistry;
   readonly instructions?: string;
+  /**
+   * Where a client's `logging/setLevel` lands. When this is absent the server declares no
+   * logging capability and answers the method as one it does not have.
+   */
+  readonly logging?: LoggingControl;
   /** Where a message this server would not answer is reported. Never stdout. */
   readonly log?: (message: string) => void;
 }
@@ -86,6 +93,7 @@ export class Server {
   private readonly serverInfo: ServerInfo;
   private readonly registry: ToolRegistry;
   private readonly instructions: string | undefined;
+  private readonly logging: LoggingControl | undefined;
   private readonly log: (message: string) => void;
   private currentPhase: Phase = 'fresh';
 
@@ -93,6 +101,7 @@ export class Server {
     this.serverInfo = options.serverInfo;
     this.registry = options.registry ?? new ToolRegistry();
     this.instructions = options.instructions;
+    this.logging = options.logging;
     this.log = options.log ?? (() => undefined);
   }
 
@@ -113,6 +122,8 @@ export class Server {
         return this.gated(request, () => this.listTools(request));
       case 'tools/call':
         return this.gated(request, () => this.callTool(request));
+      case 'logging/setLevel':
+        return this.gated(request, () => this.setLogLevel(request));
       default:
         // Includes every method of a capability this server does not declare — `logging/setLevel`,
         // `resources/*`, `prompts/*`, `completions/complete` — which `2025-11-25` answers the same
@@ -198,7 +209,9 @@ export class Server {
     this.log(`initialized on protocol ${negotiated} (client asked for ${requested})`);
     return result(request.id, {
       protocolVersion: negotiated,
-      capabilities: { tools: {} },
+      // `logging` is declared only when there is a channel to send through, so the capability
+      // and the behaviour cannot disagree.
+      capabilities: { tools: {}, ...(this.logging === undefined ? {} : { logging: {} }) },
       serverInfo: { name: this.serverInfo.name, version: this.serverInfo.version },
       ...(this.instructions === undefined ? {} : { instructions: this.instructions }),
     });
@@ -226,6 +239,35 @@ export class Server {
     }
     const tools: readonly ToolDescription[] = this.registry.list();
     return result(request.id, { tools });
+  }
+
+  /**
+   * A client's minimum level. The value is checked against the specification's own list rather
+   * than stored blindly: a level this server does not know would silence everything or nothing,
+   * and the caller would never be told which.
+   */
+  private setLogLevel(request: JsonRpcRequest): JsonRpcResponse {
+    if (this.logging === undefined) {
+      // No channel, no logging capability: the method is one this server does not have, exactly
+      // as it is for a client that never saw the capability.
+      return errorResponse(request.id, {
+        code: METHOD_NOT_FOUND,
+        message: 'Method not found: logging/setLevel',
+      });
+    }
+    const read = requestParams(request);
+    if (!read.ok) {
+      return errorResponse(request.id, read.error);
+    }
+    const level = read.params['level'];
+    if (typeof level !== 'string' || !(LOG_LEVELS as readonly string[]).includes(level)) {
+      return errorResponse(request.id, {
+        code: INVALID_PARAMS,
+        message: `Invalid params: "level" is not one of ${LOG_LEVELS.join(', ')}`,
+      });
+    }
+    this.logging?.setLevel(level as (typeof LOG_LEVELS)[number]);
+    return result(request.id, {});
   }
 
   private async callTool(request: JsonRpcRequest): Promise<JsonRpcResponse> {

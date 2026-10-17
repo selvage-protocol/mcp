@@ -34,7 +34,8 @@ two ways to start it, and they start the same program.
       "cwd": "/path/to/mcp",
       "env": {
         "SELVAGE_SERVER_URL": "ws://127.0.0.1:8080",
-        "SELVAGE_DISPLAY_NAME": "agent"
+        "SELVAGE_DISPLAY_NAME": "agent",
+        "SELVAGE_NOTIFY_CHANGES": "true"
       }
     }
   }
@@ -97,6 +98,9 @@ A first session:
    or to a second agent's `session_join`. The fragment is the room's key.
 4. Both read and edit the same files. A guest's edit arrives in the room and on the host's disk; a
    host's write arrives in every guest's `read_file`.
+5. To work live rather than poll, have the agent call `wait_for_change`: it blocks until the other
+   seat edits something and answers with the changed region, not the file. See "An agent as a live
+   collaborator" below.
 
 ## Tools
 
@@ -110,7 +114,61 @@ A first session:
 | `read_file` | The room's text for one shared path. |
 | `edit_file` | Replace `old_string` with `new_string` in a shared file, refusing an absent or an ambiguous match unless `replace_all` is set. |
 | `write_file` | Replace a shared file's whole text. |
-| `list_participants` | One line per seat: name, role, whether it is this connection, and the cursor a seat publishes — which this server does only when asked to. |
+| `list_participants` | One line per seat: name, role, whether it is this connection, the cursor a seat publishes — which this server does only when asked to — and where that peer is: the document its cursor names and the line and column the engine resolved. A peer that publishes nothing says so. |
+| `wait_for_change` | Block until the room changes a watched path, then answer with a bounded partial report — the changed region as a small diff hunk, not whole files. Returns at the first change or at its deadline, and reports what changed since the previous wait. |
+
+## An agent as a live collaborator
+
+An agent that works *with* a person has a different loop from one that answers a question: it has
+to be told when the room moves, and it must not be handed the whole document every time. That
+loop is `session_host` or `session_join`, then `wait_for_change`, then `edit_file` on what the
+wait reported, then `wait_for_change` again.
+
+`wait_for_change` blocks until a watched path actually changes, or until its deadline. It is
+always bounded: it never polls and never spins, a deadline that passes says `no change within
+N ms` rather than looking like a change, and `timeout_ms` is capped at five minutes. Watching is
+the whole grant and the open documents unless `paths` names a subset.
+
+What it returns is a partial update, never a file. For each path that changed it gives the
+changed region as a small diff hunk — `-` lines for the old text, `+` for the new, a few lines of
+context, line numbers — and the path's new length in characters. A path that appeared or
+disappeared is said in words instead of a hunk. The report is capped in size and says how many
+changes it left out; those stay pending and the next wait carries them. It reports what changed
+since the *previous* wait, not since the call, so a change that lands while the agent is thinking
+between two waits is reported by the next one rather than swallowed.
+
+`edit_file` is the writing half: the agent applies the smallest change to the region the wait
+showed it, and the room and the other seats see it. The agent's own edit is not reported back to
+it; only what the room did after is.
+
+### Being told without asking
+
+With `notify_changes: true` on `session_host` or `session_join` — or `SELVAGE_NOTIFY_CHANGES` set
+in the server's environment, the way `SELVAGE_SERVER_URL` works — the server also tells its client
+about room activity as it happens, as MCP `notifications/message` messages: document changes with
+the same bounded hunk, and peers joining and leaving. It is off by default. The messages are rate
+limited (at most one per path per half second, and at most twenty in a second across the room),
+never carry the invite, and are a second channel rather than a replacement for `wait_for_change`:
+a notification is best-effort, and the wait still owes the change it announced.
+
+A client that wants none of them can set a higher level with `logging/setLevel`; the messages are
+all `info`, so a `warning` floor silences them. That method exists only because the logging
+capability is declared, and the capability is declared only when this server has a channel to
+send through.
+
+### Where the other people are
+
+`list_participants` reads the awareness peers publish — which is anchored to relative positions —
+and reports each peer's document and selection as a line and column, so an agent can see where a
+person is typing and answer them there:
+
+```
+grace (guest, publishes a cursor) in src/main.rs selecting line 12, column 3 to line 12, column 9
+ada (host, this connection, no cursor seen)
+```
+
+A peer that publishes nothing is reported as such, and one whose anchors this replica cannot place
+is reported with its document and no position, rather than at a position this server invented.
 
 ## What it cannot do
 
@@ -127,6 +185,9 @@ A first session:
   edit changed, the start of the file for a read — and stays there between calls. It is renewed
   on the room's awareness clock and cleared when the session ends, and it says nothing about what
   the agent is reading.
+- **A change names a path, never its author.** The engine reports that a document changed but not
+  which peer changed it, so a wait or a notification says a path moved and never names the peer
+  who moved it.
 - **The invite fragment is a credential.** It is the room's key, so an invite link is as sensitive
   as the room itself: anything that holds the link can join and read what the host shares. A
   failed join reports the URL as `[invite]` rather than echoing the key.

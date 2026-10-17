@@ -318,6 +318,58 @@ test('the server answers with the protocol error that fits, and keeps a tool fai
   assert.ok(logs.some((line) => line.includes('unknown tool')), logs.join('\n'));
 });
 
+test('logging/setLevel is a method this server has only when it has a channel to log through', async () => {
+  const levels: string[] = [];
+  const logging = new Server({
+    serverInfo: { name: 'selvage-mcp', version: '0.1.0' },
+    logging: { setLevel: (level) => levels.push(level) },
+  });
+  const handshake = await logging.answer({
+    jsonrpc: '2.0',
+    id: 0,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25' },
+  });
+  assert.deepEqual(resultOf(handshake)['capabilities'], { tools: {}, logging: {} });
+  logging.notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+  const accepted = await logging.answer({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'logging/setLevel',
+    params: { level: 'warning' },
+  });
+  assert.deepEqual(resultOf(accepted), {});
+  assert.deepEqual(levels, ['warning']);
+
+  const refused = await logging.answer({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'logging/setLevel',
+    params: { level: 'loud' },
+  });
+  assert.equal(errorOf(refused)['code'], -32602);
+  assert.match(String(errorOf(refused)['message']), /is not one of/);
+
+  // A server with no channel declares no logging capability and does not have the method.
+  const bare = new Server({ serverInfo: { name: 'selvage-mcp', version: '0.1.0' } });
+  const bareHandshake = await bare.answer({
+    jsonrpc: '2.0',
+    id: 0,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25' },
+  });
+  assert.deepEqual(resultOf(bareHandshake)['capabilities'], { tools: {} });
+  bare.notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  const missing = await bare.answer({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'logging/setLevel',
+    params: { level: 'info' },
+  });
+  assert.equal(errorOf(missing)['code'], -32601);
+});
+
 test('negotiation gives back the revision asked for when it is one of ours, and the latest when it is not', () => {
   assert.equal(negotiateVersion('2025-11-25'), '2025-11-25');
   assert.equal(negotiateVersion('2025-06-18'), '2025-06-18');

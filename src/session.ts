@@ -36,6 +36,8 @@ import {
 import type { Engine, TextChange } from '../vendor/bridge/index.ts';
 import { sessionBase } from '../vendor/engine/index.ts';
 import type { EngineEvent, PeerInfo, Role } from '../vendor/engine/index.ts';
+import { MAX_HUNK_LINES, positionAt, renderHunk } from './changes.ts';
+import type { Position } from './changes.ts';
 import { enumerateGrant, readGrantedFile, writeGrantedFile } from './grant.ts';
 import type { GrantCut } from './grant.ts';
 
@@ -154,6 +156,21 @@ export interface Participant {
   readonly aware: boolean;
   /** Whether this is the connection this process holds. */
   readonly self: boolean;
+  /** The document the peer's awareness names, when it names one. */
+  readonly path?: string;
+  /**
+   * The peer's selection resolved to line and column, when the engine could resolve it. Absent
+   * for a peer that publishes nothing, and for one whose anchors name a document this replica
+   * cannot place them in — `aware` is what tells those two apart.
+   */
+  readonly cursor?: CursorPosition;
+}
+
+/** A peer's selection as a reader counts it: one-based lines and columns, in one document. */
+export interface CursorPosition {
+  readonly path: string;
+  readonly anchor: Position;
+  readonly head: Position;
 }
 
 /**
@@ -220,6 +237,8 @@ export interface HostOptions {
    * is, and a caller that did not ask for one should not have it invented.
    */
   readonly publishCursor?: boolean;
+  /** Whether this session tells its client about room activity without being asked. */
+  readonly notifyChanges?: boolean;
 }
 
 export interface JoinOptions {
@@ -228,6 +247,8 @@ export interface JoinOptions {
   readonly displayName: string;
   /** See {@link HostOptions.publishCursor}. */
   readonly publishCursor?: boolean;
+  /** See {@link HostOptions.notifyChanges}. */
+  readonly notifyChanges?: boolean;
 }
 
 /** What a read of a granted path found in the room's text. */
@@ -249,6 +270,72 @@ export interface EditOutcome {
   readonly disk: 'none' | 'written' | 'unchanged' | 'refused';
 }
 
+/**
+ * One document as a wait or a notification reports it: a changed region, an arrival or a
+ * departure, and the length the document holds now. `hunk` is empty for an arrival or a
+ * departure, which are said in words rather than shown as a diff.
+ */
+export interface PathChange {
+  readonly path: string;
+  readonly kind: 'changed' | 'appeared' | 'disappeared';
+  /** The document's length in UTF-16 code units after the change; `0` for a departure. */
+  readonly length: number;
+  readonly hunk: readonly string[];
+  /** Whether `hunk` was cut to a bound, so the agent knows it is not the whole region. */
+  readonly truncated: boolean;
+}
+
+/** What a wait saw: the changes since the last wait, or plainly that its deadline passed. */
+export interface WaitReport {
+  readonly changes: readonly PathChange[];
+  readonly peersChanged: boolean;
+  readonly listingChanged: boolean;
+  /** True when the deadline passed with nothing to report, which is not a change. */
+  readonly timedOut: boolean;
+  /** True when the connection is no longer live, so a wait returned early rather than hang. */
+  readonly ended: boolean;
+  /** How many changes the size cap left out; they stay pending for the next wait. */
+  readonly omitted: number;
+  /** How many paths this wait watched. */
+  readonly watched: number;
+  /** How many documents the room held when the wait ended. */
+  readonly documents: number;
+  /** How many seats the room held when the wait ended. */
+  readonly participants: number;
+  /** The deadline this wait was given, for a report that says the deadline passed. */
+  readonly timeoutMs: number;
+}
+
+/** What a wait is asked for: which paths, and how long it may block. */
+export interface WaitOptions {
+  /** The paths to watch; the whole grant and the open documents when absent. */
+  readonly paths?: readonly string[] | undefined;
+  readonly timeoutMs: number;
+}
+
+/**
+ * Room activity as this adapter describes it, before any protocol framing: a document changed,
+ * or the roster did. The transport turns one of these into a notification; the session decides
+ * what is worth saying and how often.
+ */
+export type Activity =
+  | {
+      readonly kind: 'document';
+      readonly path: string;
+      readonly length: number;
+      readonly hunk: readonly string[];
+      readonly truncated: boolean;
+      readonly appeared: boolean;
+    }
+  | {
+      readonly kind: 'peers';
+      readonly joined: readonly string[];
+      readonly left: readonly string[];
+    };
+
+/** Where a session hands its activity, when the caller opted in. */
+export type ActivityListener = (activity: Activity) => void;
+
 export interface SessionOptions {
   /** The engine factory. Defaults to `realEngines`; a test hands in a stub. */
   readonly engines?: EngineFactory;
@@ -267,6 +354,8 @@ export interface SessionOptions {
    * (`§8.2`), which is the window an awareness state is renewed on and expires after.
    */
   readonly cursorRenewMs?: number;
+  /** Where room activity goes when the session is opened with notifications on. */
+  readonly notify?: ActivityListener;
 }
 
 /** The host's own listing, as the engine reads it when it seals a state (`§7.1`). */
@@ -296,12 +385,37 @@ export class Session {
   private readonly problemLimit: number;
   /** How often a published cursor is renewed; the room's own window when the caller names none. */
   private readonly cursorRenewMs: number | undefined;
+  private readonly notify: ActivityListener | undefined;
   private readonly listing = new Listing();
   private readonly problems: SessionProblem[] = [];
   /** The seed in flight per path, so a second ask for one joins it rather than reading again. */
   private readonly seeding = new Map<string, Promise<void>>();
   /** The write-back in flight per path, so two room changes for one path never write at once. */
   private readonly writing = new Map<string, Promise<void>>();
+  /**
+   * The watermark a wait reads: each path's text as of the last thing this session accounted
+   * for, so a wait diffs against what the agent has already seen and not against where the
+   * document happened to be when the wait was called. A local edit and a host's own seed move it
+   * too, because those are changes this seat already knows about. Nothing clears it between
+   * waits, which is why a change that lands while the agent is thinking is still there to report.
+   */
+  private readonly baseline = new Map<string, string>();
+  /**
+   * The same idea for notifications, advanced on every room change: a notification is a delta
+   * from the last one, and it never touches `baseline`, so announcing a change does not consume
+   * it from the wait that owes the agent a report of it.
+   */
+  private readonly notifyBaseline = new Map<string, string>();
+  /** The peers the roster last reported, by id, for telling a join from a leave. */
+  private lastPeers = new Map<string, string>();
+  /** Whether the roster or the listing changed since a wait last reported it. */
+  private pendingPeers = false;
+  private pendingListing = false;
+  /** Waits blocked on a change, each asked again when the room moves. */
+  private readonly waiters = new Set<() => void>();
+  /** When a path was last announced, so one path cannot storm a client. */
+  private readonly notifyLastAt = new Map<string, number>();
+  private notifyWindow: number[] = [];
 
   private engine: SessionEngine | undefined;
   private mode: Mode | undefined;
@@ -314,6 +428,8 @@ export class Session {
   /** The last position published, kept so the renewal can repeat it. */
   private cursor: { readonly path: string; readonly at: number } | undefined;
   private cursorTimer: ReturnType<typeof setInterval> | undefined;
+  /** Whether the live session opted in to telling its client about activity. */
+  private notifyEnabled = false;
 
   constructor(options: SessionOptions = {}) {
     this.engines = options.engines ?? realEngines;
@@ -321,6 +437,7 @@ export class Session {
     this.grantWaitMs = options.grantWaitMs ?? 250;
     this.problemLimit = options.problemLimit ?? 20;
     this.cursorRenewMs = options.cursorRenewMs;
+    this.notify = options.notify;
   }
 
   /** Whether a session is live, which is what `host` and `join` refuse over. */
@@ -366,7 +483,14 @@ export class Session {
         masked(address, sentence(error), '[address]'),
       );
     }
-    this.adopt(engine, 'host', root, walked.cut, options.publishCursor === true);
+    this.adopt(
+      engine,
+      'host',
+      root,
+      walked.cut,
+      options.publishCursor === true,
+      options.notifyChanges === true,
+    );
     const invite = engine.inviteUrl();
     if (invite === undefined) {
       await this.leave();
@@ -396,7 +520,14 @@ export class Session {
     } catch (error: unknown) {
       throw new SessionRefused('join-failed', masked(invite, sentence(error)));
     }
-    this.adopt(engine, 'guest', undefined, undefined, options.publishCursor === true);
+    this.adopt(
+      engine,
+      'guest',
+      undefined,
+      undefined,
+      options.publishCursor === true,
+      options.notifyChanges === true,
+    );
     await this.settleGrant();
     const info = engine.session();
     const paths = this.grantedPaths();
@@ -445,6 +576,15 @@ export class Session {
     this.problems.length = 0;
     this.seeding.clear();
     this.writing.clear();
+    this.baseline.clear();
+    this.notifyBaseline.clear();
+    this.lastPeers.clear();
+    this.pendingPeers = false;
+    this.pendingListing = false;
+    this.notifyLastAt.clear();
+    this.notifyWindow = [];
+    this.notifyEnabled = false;
+    this.waiters.clear();
     try {
       if (published) {
         // The caret does not outlive the session: a state left behind would show a seat that is
@@ -466,19 +606,43 @@ export class Session {
 
   /**
    * Every seat in the room: this connection's own peer record and the peers the room reports,
-   * each with whether it has published awareness.
+   * each with whether it has published awareness and, where the engine can place it, the
+   * document and selection that awareness names.
    *
-   * `presence()` is asked rather than a cursor rendered: this adapter reports that a peer is
-   * here and publishing, and never invents a selection for it (`engine.md` §6).
+   * A cursor arrives as anchors, which are relative positions (`§8.1`): the engine resolves them
+   * to offsets in the document this replica holds, and this adapter counts them into a line and
+   * a column. A peer whose state names no document, or whose anchors cannot be placed here, is
+   * still `aware` — this adapter reports where a person is, and never invents it (`engine.md` §6).
    */
   participants(): readonly Participant[] {
     const engine = this.requireLive('listing the room');
     const aware = new Set<string>();
+    const where = new Map<string, string>();
+    const cursors = new Map<string, CursorPosition>();
     for (const presence of engine.presence()) {
       const peer: PeerInfo | undefined = presence.peer;
-      if (peer !== undefined && presence.state !== undefined) {
-        aware.add(peer.peer_id);
+      const state = presence.state;
+      if (peer === undefined || state === undefined) {
+        continue;
       }
+      aware.add(peer.peer_id);
+      if (state.path === undefined) {
+        continue;
+      }
+      where.set(peer.peer_id, state.path);
+      if (state.selection === undefined) {
+        continue;
+      }
+      const resolved = engine.resolveSelection(state.path, state.selection);
+      if (resolved === undefined) {
+        continue;
+      }
+      const text = engine.text(state.path);
+      cursors.set(peer.peer_id, {
+        path: state.path,
+        anchor: positionAt(text, resolved.anchor),
+        head: positionAt(text, resolved.head),
+      });
     }
     const info = engine.session();
     const rows: Participant[] = [];
@@ -488,15 +652,75 @@ export class Session {
         continue;
       }
       seen.add(peer.peer_id);
+      const path = where.get(peer.peer_id);
+      const cursor = cursors.get(peer.peer_id);
       rows.push({
         peerId: peer.peer_id,
         displayName: peer.display_name,
         role: peer.role,
         aware: aware.has(peer.peer_id),
         self: peer.peer_id === info.peer.peer_id,
+        ...(path === undefined ? {} : { path }),
+        ...(cursor === undefined ? {} : { cursor }),
       });
     }
     return rows;
+  }
+
+  /**
+   * Blocks until the room changes a watched path, or until the deadline passes.
+   *
+   * What it returns is what changed since the last wait, computed against the watermark this
+   * session has kept since then, not against a snapshot taken now: a change that landed between
+   * the last wait returning and this call is part of the report. It never spins — it is woken by
+   * the room's own events and bounded by the deadline — and a deadline that passes says so
+   * rather than looking like a change.
+   */
+  async waitForChange(options: WaitOptions): Promise<WaitReport> {
+    const watch = options.paths;
+    const includeRoster = options.paths === undefined;
+    const ready = this.takeChanges(watch, includeRoster);
+    if (ready !== undefined) {
+      return ready;
+    }
+    return await new Promise<WaitReport>((settle) => {
+      let finished = false;
+      let settling: NodeJS.Timeout | undefined;
+      const finish = (report: WaitReport): void => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        if (settling !== undefined) {
+          clearTimeout(settling);
+        }
+        clearTimeout(deadline);
+        this.waiters.delete(wake);
+        settle(report);
+      };
+      // One edit can arrive as more than one frame — a replacement is a delete and an insert —
+      // so a wake waits for the stream to go quiet before it reports. The settle is not re-armed
+      // by later wakes: a room under a continuous stream still returns within the settle rather
+      // than being starved, and the frames after it are the next wait's.
+      const wake = (): void => {
+        if (settling !== undefined) {
+          return;
+        }
+        settling = setTimeout(() => {
+          settling = undefined;
+          const report = this.takeChanges(watch, includeRoster);
+          if (report !== undefined) {
+            finish(report);
+          }
+        }, WAIT_SETTLE_MS);
+      };
+      const deadline = setTimeout(() => {
+        // The deadline re-reads before it gives up, so a change that landed on the last frame is
+        // reported rather than called a quiet room.
+        finish(this.takeChanges(watch, includeRoster) ?? this.deadlineReport(watch, options.timeoutMs));
+      }, options.timeoutMs);
+      this.waiters.add(wake);
+    });
   }
 
   /**
@@ -591,6 +815,9 @@ export class Session {
     if (caret !== undefined) {
       this.showCursor(path, caret);
     }
+    // This seat's own edit is not a change to report back to it, so the watermark moves to what
+    // the edit left. A room change that lands after it is still a diff against this.
+    this.baseline.set(path, wanted);
     return { path, length: wanted.length, disk: await this.keepWorkingCopy(path, wanted) };
   }
 
@@ -625,6 +852,7 @@ export class Session {
     root: string | undefined,
     cut: GrantCut | undefined,
     publishCursor: boolean,
+    notifyChanges: boolean,
   ): void {
     this.engine = engine;
     this.mode = mode;
@@ -637,6 +865,14 @@ export class Session {
     this.stopCursorRenewal();
     this.cursorEnabled = publishCursor;
     this.cursor = undefined;
+    this.baseline.clear();
+    this.notifyBaseline.clear();
+    this.pendingPeers = false;
+    this.pendingListing = false;
+    this.notifyLastAt.clear();
+    this.notifyWindow = [];
+    this.notifyEnabled = notifyChanges;
+    this.lastPeers = new Map(engine.session().peers.map((peer) => [peer.peer_id, peer.display_name]));
     engine.on((event) => {
       this.noteEvent(event);
     });
@@ -723,17 +959,26 @@ export class Session {
       case 'disconnected':
       case 'roomGone':
         this.live = false;
+        this.wakeWaiters();
         break;
       case 'documentChanged':
         this.live = true;
         void this.applyFromRoom(event.path);
+        this.recordDocument(event.path);
         break;
       case 'documentsChanged':
         this.live = true;
         void this.seedRoom(event.documents);
         break;
       case 'grantChanged':
+        this.live = true;
+        this.pendingListing = true;
+        this.wakeWaiters();
+        break;
       case 'peersChanged':
+        this.live = true;
+        this.recordPeers(event.peers);
+        break;
       case 'presenceChanged':
       case 'hostAttached':
         this.live = true;
@@ -888,6 +1133,10 @@ export class Session {
       return;
     }
     engine.insert(path, 0, toCrdt(read.text));
+    // The host's own seed is a change this seat already knows about, so it moves the watermark
+    // rather than waiting to be reported back. It is also what a guest's first edit is diffed
+    // against, which is why a host sees a hunk and not an arrival.
+    this.baseline.set(path, engine.text(path));
   }
 
   /**
@@ -1074,6 +1323,202 @@ export class Session {
     }
   }
 
+  /**
+   * A room change to one document. The watermark a wait reads is not touched here — a wait finds
+   * the change by comparing the document against it — but a notification, when the client asked
+   * for one, is built now from the previous text this session announced.
+   */
+  private recordDocument(path: string): void {
+    const engine = this.engine;
+    if (this.notifyEnabled && this.notify !== undefined && engine !== undefined && engine.has(path)) {
+      const current = engine.text(path);
+      // The first announcement of a path this seat has already accounted for — its own edit, or
+      // a seed — is a delta from that, not an arrival: the watermark is the fallback before this
+      // channel has one of its own.
+      const before = this.notifyBaseline.get(path) ?? this.baseline.get(path);
+      this.notifyBaseline.set(path, current);
+      if (before === undefined) {
+        this.emitDocument(path, current.length, [], false, true);
+      } else {
+        const hunk = renderHunk(before, current);
+        if (hunk.lines.length > 0) {
+          this.emitDocument(path, current.length, hunk.lines, hunk.truncated, false);
+        }
+      }
+    }
+    this.wakeWaiters();
+  }
+
+  /** Announces one document's change, at most once per path per window and never in a storm. */
+  private emitDocument(
+    path: string,
+    length: number,
+    hunk: readonly string[],
+    truncated: boolean,
+    appeared: boolean,
+  ): void {
+    const notify = this.notify;
+    if (notify === undefined) {
+      return;
+    }
+    const now = Date.now();
+    const last = this.notifyLastAt.get(path);
+    if (last !== undefined && now - last < NOTIFY_PER_PATH_MS) {
+      return;
+    }
+    this.notifyWindow = this.notifyWindow.filter((at) => now - at < NOTIFY_WINDOW_MS);
+    if (this.notifyWindow.length >= NOTIFY_MAX_PER_WINDOW) {
+      return;
+    }
+    this.notifyLastAt.set(path, now);
+    this.notifyWindow.push(now);
+    notify({ kind: 'document', path, length, hunk: hunk.slice(0, MAX_HUNK_LINES), truncated, appeared });
+  }
+
+  /** A roster change: who joined and who left, for a notification and for a wait's own line. */
+  private recordPeers(peers: readonly PeerInfo[]): void {
+    const now = new Map(peers.map((peer) => [peer.peer_id, peer.display_name]));
+    const joined = [...now].filter(([id]) => !this.lastPeers.has(id));
+    const left = [...this.lastPeers].filter(([id]) => !now.has(id));
+    this.lastPeers = now;
+    if (joined.length === 0 && left.length === 0) {
+      return;
+    }
+    this.pendingPeers = true;
+    if (this.notifyEnabled && this.notify !== undefined) {
+      this.notify({
+        kind: 'peers',
+        joined: joined.slice(0, NOTIFY_MAX_NAMES).map(([, name]) => name),
+        left: left.slice(0, NOTIFY_MAX_NAMES).map(([, name]) => name),
+      });
+    }
+    this.wakeWaiters();
+  }
+
+  /**
+   * What changed since the last wait, and the act of marking it reported. `undefined` means
+   * there is nothing to say, which is what leaves a wait blocked rather than spinning.
+   */
+  private takeChanges(
+    watch: readonly string[] | undefined,
+    includeRoster: boolean,
+  ): WaitReport | undefined {
+    const engine = this.requireLive('waiting for a change');
+    const watched = [...new Set(watch ?? this.defaultWatch())];
+    const changes: PathChange[] = [];
+    const committed: string[] = [];
+    let bytes = 0;
+    let omitted = 0;
+    for (const path of watched) {
+      const change = this.changeFor(path, engine);
+      if (change === undefined) {
+        continue;
+      }
+      if (changes.length > 0 && bytes + sizeOfChange(change) > MAX_REPORT_BYTES) {
+        omitted += 1;
+        continue;
+      }
+      changes.push(change);
+      bytes += sizeOfChange(change);
+      committed.push(path);
+    }
+    const peers = includeRoster && this.pendingPeers;
+    const listing = includeRoster && this.pendingListing;
+    if (changes.length === 0 && !peers && !listing) {
+      // A room that is no longer live would otherwise keep a wait until its deadline for an
+      // answer that is not coming.
+      return this.live ? undefined : this.summary(watched, false, true, 0);
+    }
+    for (const path of committed) {
+      if (engine.has(path)) {
+        this.baseline.set(path, engine.text(path));
+      } else {
+        this.baseline.delete(path);
+      }
+    }
+    if (peers) {
+      this.pendingPeers = false;
+    }
+    if (listing) {
+      this.pendingListing = false;
+    }
+    return {
+      changes,
+      peersChanged: peers,
+      listingChanged: listing,
+      timedOut: false,
+      ended: false,
+      omitted,
+      watched: watched.length,
+      documents: engine.session().documents.length,
+      participants: this.participants().length,
+      timeoutMs: 0,
+    };
+  }
+
+  /** One watched path as it stands against the watermark, or `undefined` if it has not moved. */
+  private changeFor(path: string, engine: SessionEngine): PathChange | undefined {
+    const before = this.baseline.get(path);
+    if (!engine.has(path)) {
+      return before === undefined
+        ? undefined
+        : { path, kind: 'disappeared', length: 0, hunk: [], truncated: false };
+    }
+    const after = engine.text(path);
+    if (before === undefined) {
+      return { path, kind: 'appeared', length: after.length, hunk: [], truncated: false };
+    }
+    if (before === after) {
+      return undefined;
+    }
+    const hunk = renderHunk(before, after);
+    if (hunk.lines.length === 0) {
+      return undefined;
+    }
+    return { path, kind: 'changed', length: after.length, hunk: hunk.lines, truncated: hunk.truncated };
+  }
+
+  /** The paths a wait watches when the caller named none: the grant, the open set, and the last seen. */
+  private defaultWatch(): readonly string[] {
+    const engine = this.requireLive('waiting for a change');
+    return [
+      ...new Set([...engine.grantedPaths(), ...engine.session().documents, ...this.baseline.keys()]),
+    ];
+  }
+
+  private deadlineReport(watch: readonly string[] | undefined, timeoutMs: number): WaitReport {
+    const watched = watch ?? this.defaultWatch();
+    return { ...this.summary(watched, true, false, 0), timeoutMs };
+  }
+
+  /** A report that carries no change: a deadline that passed, or a room that ended. */
+  private summary(
+    watched: readonly string[],
+    timedOut: boolean,
+    ended: boolean,
+    omitted: number,
+  ): WaitReport {
+    const engine = this.requireLive('waiting for a change');
+    return {
+      changes: [],
+      peersChanged: false,
+      listingChanged: false,
+      timedOut,
+      ended,
+      omitted,
+      watched: watched.length,
+      documents: engine.session().documents.length,
+      participants: this.participants().length,
+      timeoutMs: 0,
+    };
+  }
+
+  private wakeWaiters(): void {
+    for (const wake of [...this.waiters]) {
+      wake();
+    }
+  }
+
   /** Keeps a refusal nobody asked for, so that `status` can report a host that has fallen behind. */
   private note(path: string | undefined, cause: SessionRefusal, message: string): void {
     this.problems.push({ path, cause, message });
@@ -1085,6 +1530,38 @@ export class Session {
 
 /** How often a bounded wait re-reads its predicate between the events that wake it. */
 const POLL_MS = 20;
+
+/**
+ * How long a wait lets the room go quiet after a wake before it reports. One edit can be several
+ * frames, and a report between two of them would describe half a change.
+ */
+const WAIT_SETTLE_MS = 50;
+
+/**
+ * The largest report one wait or notification carries, in UTF-8 bytes of its rendered text. A
+ * report that hits it says how many changes it left out, and those stay pending for the next
+ * wait rather than being marked reported.
+ */
+export const MAX_REPORT_BYTES = 16 * 1024;
+
+/** How often one path may be announced: a burst of keystrokes is one notification per window. */
+const NOTIFY_PER_PATH_MS = 500;
+
+/** How many notifications may go out in one window, across every path. */
+const NOTIFY_MAX_PER_WINDOW = 20;
+const NOTIFY_WINDOW_MS = 1_000;
+
+/** How many names a roster notification carries. */
+const NOTIFY_MAX_NAMES = 8;
+
+/** The bytes one reported change costs, for the bound on a whole report. */
+function sizeOfChange(change: PathChange): number {
+  let total = Buffer.byteLength(change.path, 'utf8') + 1;
+  for (const line of change.hunk) {
+    total += Buffer.byteLength(line, 'utf8') + 1;
+  }
+  return total;
+}
 
 /**
  * What a wait the room's own clocks bound is given beside them: one round trip, for the state a

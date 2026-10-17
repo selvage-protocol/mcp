@@ -22,6 +22,11 @@ import { Server } from './server.ts';
 import type { ServerInfo } from './server.ts';
 import { serve } from './stdio.ts';
 
+// `./notify.ts` is imported here rather than lazily below because `./server.ts` already reaches
+// it statically for `LOG_LEVELS`: it is in the entry chunk whatever this file does, and reaching
+// it lazily as well only splits its code into a chunk the entry then imports ahead of the rest.
+import { ActivityChannel } from './notify.ts';
+
 /**
  * Anything this process prints on stdout is a message, so a diagnostic goes to stderr — where
  * the client may show it or ignore it, and where `2025-11-25/basic/transports.mdx` says so.
@@ -137,19 +142,21 @@ process.stdout.on('error', (error: unknown) => {
   process.exitCode = 1;
 });
 
-const session = new Session();
+const activity = new ActivityChannel();
+const session = new Session({ notify: (one) => activity.deliver(one) });
 const registry = new ToolRegistry();
 for (const tool of createSessionTools(session)) {
   registry.register(tool);
 }
 
-const server = new Server({ serverInfo: packageInfo(), log: diagnostic, registry });
+const server = new Server({ serverInfo: packageInfo(), log: diagnostic, registry, logging: activity });
 
 try {
   await serve(server, {
     input: process.stdin,
     output: process.stdout,
     diagnostic,
+    onWriter: (write) => activity.attach(write),
   });
   diagnostic('stdin closed; stopping');
 } catch (error: unknown) {

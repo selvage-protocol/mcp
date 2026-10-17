@@ -1,5 +1,5 @@
 /**
- * The nine tools against a stub engine: the schemas they register with, what each answers, and
+ * The ten tools against a stub engine: the schemas they register with, what each answers, and
  * what each refuses. The engine is a stub for the same reason the adapter's own tests use one —
  * a tool's decisions are not the room's, and the room's behaviour is held elsewhere.
  *
@@ -15,7 +15,7 @@ import { ToolRegistry } from '../src/registry.ts';
 import type { CallToolResult, ToolDefinition } from '../src/registry.ts';
 import { Session } from '../src/session.ts';
 import type { SessionOptions } from '../src/session.ts';
-import { createSessionTools } from '../src/tools.ts';
+import { createSessionTools, MAX_WAIT_MS } from '../src/tools.ts';
 import { StubEngine, StubFactory, peer } from './helpers/stub-engine.ts';
 import { TMP, put, remove, scratch } from './helpers/scratch.ts';
 
@@ -70,7 +70,7 @@ function failed(result: CallToolResult): string {
   return text;
 }
 
-test('the surface is nine tools whose schemas register, each with a name and a description', () => {
+test('the surface is ten tools whose schemas register, each with a name and a description', () => {
   const benchmark = bench();
   assert.deepEqual(
     benchmark.tools.map((one) => one.name),
@@ -84,13 +84,14 @@ test('the surface is nine tools whose schemas register, each with a name and a d
       'edit_file',
       'write_file',
       'list_participants',
+      'wait_for_change',
     ],
   );
   const registry = new ToolRegistry();
   for (const one of benchmark.tools) {
     registry.register(one);
   }
-  assert.equal(registry.list().length, 9);
+  assert.equal(registry.list().length, 10);
   for (const one of benchmark.tools) {
     assert.ok(
       one.description.length > 80,
@@ -558,6 +559,71 @@ test('list_participants names the seats, their roles and the presence each publi
   } finally {
     await remove(root);
   }
+});
+
+test('list_participants resolves a peer cursor to a line and column in the document it names', async () => {
+  const root = await scratch('tools-seats-cursor');
+  try {
+    await put(root, 'a.txt', 'one\ntwo\nthree\n');
+    const dana = peer('p1', 'dana', 'guest', 7);
+    const benchmark = bench({
+      engine: new StubEngine({
+        role: 'host',
+        invite: INVITE,
+        self: peer('self', 'agent', 'host'),
+        peers: [dana],
+        texts: new Map([['a.txt', 'one\ntwo\nthree\n']]),
+        presence: [
+          {
+            clientId: 7,
+            peer: dana,
+            state: {
+              path: 'a.txt',
+              selection: { anchor: { assoc: 0, tname: 'a.txt' }, head: { assoc: 0, tname: 'a.txt' } },
+            },
+          },
+        ],
+        resolveSelection: () => ({ anchor: 4, head: 7 }),
+      }),
+    });
+    await call(benchmark, 'session_host', { folder: root, server_url: 'ws://room.example' });
+    const text = textOf(await call(benchmark, 'list_participants'));
+    assert.match(text, /dana \(guest, publishes a cursor\) in a\.txt selecting line 2, column 1 to line 2, column 4/);
+  } finally {
+    await remove(root);
+  }
+});
+
+test('wait_for_change answers a deadline plainly, and a room change as a bounded hunk', async () => {
+  const engine = new StubEngine({
+    role: 'guest',
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one\ntwo\n']]),
+  });
+  const benchmark = bench({ engine });
+  await call(benchmark, 'session_join', { invite: INVITE });
+  // This seat's own edit is the watermark, not a change to report back.
+  await call(benchmark, 'edit_file', { path: 'a.txt', old_string: 'one', new_string: 'ONE' });
+
+  const deadline = textOf(await call(benchmark, 'wait_for_change', { timeout_ms: 30 }));
+  assert.match(deadline, /^no change within 30 ms: watched 1 path\(s\)/);
+
+  engine.remote('a.txt', 'ONE\nTWO\n');
+  engine.emit({ type: 'documentChanged', path: 'a.txt' });
+  const changed = textOf(await call(benchmark, 'wait_for_change', { timeout_ms: 1_000 }));
+  assert.match(changed, /^a\.txt: changed \(\d+ characters now\)$/m);
+  assert.match(changed, /^- +2 two$/m);
+  assert.match(changed, /^\+ +2 TWO$/m);
+});
+
+test('wait_for_change refuses a deadline above its cap and one that is not a count', async () => {
+  const benchmark = bench({ engine: new StubEngine({ role: 'guest', listing: [] }) });
+  await call(benchmark, 'session_join', { invite: INVITE });
+  const over = failed(await call(benchmark, 'wait_for_change', { timeout_ms: MAX_WAIT_MS + 1 }));
+  assert.match(over, /waits at most/);
+  const zero = failed(await call(benchmark, 'wait_for_change', { timeout_ms: 0 }));
+  assert.match(zero, /at least 1/);
 });
 
 test('session_leave frees the process, and a second leave is a caller error', async () => {
