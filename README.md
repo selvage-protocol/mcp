@@ -14,23 +14,23 @@ Status: v1 in progress. Hosting, joining by invite, and editing in both directio
 
 You need:
 
-- Node 22.18 or newer on `PATH`, and `npm ci` run once in this directory. The sync engine runs at
-  every end of a session, so an agent that edits a room runs the same code an editor does.
+- Node 22.18 or newer on `PATH`. The sync engine runs at every end of a session, so an agent that
+  edits a room runs the same code an editor does.
 - A `selvaged` to connect to. Start one and note the address it prints.
 
-The package is not published, so there is no `npx` command for it: point your client at the entry
-point in a checkout. `src/main.ts` is executable and carries a shebang, so
-`node <path>/src/main.ts` and `<path>/src/main.ts` both start it. It is a stdio server — one
-JSON-RPC message per line — and its diagnostics go to stderr.
+It is a stdio server — one JSON-RPC message per line — and its diagnostics go to stderr. There are
+two ways to start it, and they start the same program.
 
-An MCP client configuration:
+**From a checkout.** `npm ci` installs the dependencies and builds the runnable artifact, because
+`prepare` runs `npm run build`: a bundle of the sources and the vendored engine, written to
+`dist/`. Point a client at it:
 
 ```json
 {
   "mcpServers": {
     "selvage": {
       "command": "node",
-      "args": ["/path/to/mcp/src/main.ts"],
+      "args": ["/path/to/mcp/dist/main.js"],
       "cwd": "/path/to/mcp",
       "env": {
         "SELVAGE_SERVER_URL": "ws://127.0.0.1:8080",
@@ -40,6 +40,36 @@ An MCP client configuration:
   }
 }
 ```
+
+`dist/main.js` carries a shebang and the executable bit, so it is also the command `bin` names:
+`selvage-mcp` and `node <path>/dist/main.js` are the same process. `npm run build` alone rebuilds
+it. `src/main.ts` is the same server run straight from the sources — Node 22.18 strips the types
+as it loads it — so `node <path>/src/main.ts` works too, with no build at all.
+
+**From git, with no checkout.** `npx` fetches the repository, installs it, which runs the same
+build, and starts the command the package declares:
+
+```json
+{
+  "mcpServers": {
+    "selvage": {
+      "command": "npx",
+      "args": ["-y", "github:selvage-protocol/mcp"],
+      "env": {
+        "SELVAGE_SERVER_URL": "ws://127.0.0.1:8080",
+        "SELVAGE_DISPLAY_NAME": "agent"
+      }
+    }
+  }
+}
+```
+
+There is no `cwd` to set: the server reads its own `package.json` from where it was installed, and
+everything else it needs arrives through the environment or through a tool call.
+
+**The package is not on npm**, and `npx selvage-mcp` does not exist. It stays `private: true`:
+publishing needs an account and a token for the scope, and that is not a decision this repository
+takes on its own. The git form above is the same package a publish would carry.
 
 `SELVAGE_SERVER_URL` is the Selvage server's address, and it matters because it is the only way
 the address arrives without being asked for: a client starts this server as a subprocess and has
@@ -95,6 +125,11 @@ A first session:
 `npm run typecheck` and `npm test` are what CI runs, and they need nothing but Node: the suite
 includes interop against a real third-party client, the official `@modelcontextprotocol/sdk`,
 driving the shipped process.
+
+`test/packed.test.ts` is the packaging proof rather than the exercise: it runs `npm pack` here,
+installs the tarball into a scratch project outside this checkout, and drives the installed command
+— not the sources — through `initialize` and `tools/list`. It fails, rather than skipping, when the
+artifact is not in the tarball.
 
 `npm run test:e2e` is the proof rather than the exercise: two MCP servers over their real stdio,
 editing one room on a real `selvaged`, converging in both directions. It **fails** rather than
