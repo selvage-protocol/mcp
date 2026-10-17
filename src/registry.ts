@@ -1,12 +1,13 @@
 /**
  * The tools this server offers, and the one place a `tools/call` is validated and dispatched.
  *
- * There are no tools yet: `tools/list` answers with the empty list until stage 2 registers the
- * session tools, and the registry is what it will register them into. It exists now because the
- * two halves it decides have to be right before anything is built on them — an argument set is
- * checked against the tool's own `inputSchema` before the tool sees it, and an execution error is
- * a *result* carrying `isError: true` rather than a protocol error, which is the distinction
- * `2025-11-25/server/tools.mdx` draws so that the caller can see the failure and correct itself.
+ * The session tools are registered into it by `src/main.ts`, from `createSessionTools`: one
+ * registry per process, holding the tools an agent may call and nothing else. It exists apart
+ * from them because the two halves it decides have to be right whatever a tool does — an argument
+ * set is checked against the tool's own `inputSchema` before the tool sees it, and an execution
+ * error is a *result* carrying `isError: true` rather than a protocol error, which is the
+ * distinction `2025-11-25/server/tools.mdx` draws so that the caller can see the failure and
+ * correct itself.
  *
  * A tool that is not there, or whose arguments do not fit it, is a different thing entirely: a
  * protocol error the server answers with `-32602`. That is why `call` reports what happened in
