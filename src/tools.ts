@@ -31,6 +31,9 @@ export const DISPLAY_NAME_VARIABLE = 'SELVAGE_DISPLAY_NAME';
 /** The display name a seat gets when neither the argument nor the variable names one. */
 export const DEFAULT_DISPLAY_NAME = 'agent';
 
+/** What a host's or a joiner's cursor publication falls back to when the argument is absent. */
+export const PUBLISH_CURSOR_VARIABLE = 'SELVAGE_PUBLISH_CURSOR';
+
 /** How many paths `list_paths` answers with when the caller names no limit. */
 export const DEFAULT_PATH_LIMIT = 100;
 
@@ -126,6 +129,25 @@ function displayName(args: Readonly<Record<string, unknown>>, env: Environment):
   return optionalText(args, 'display_name') ?? env[DISPLAY_NAME_VARIABLE] ?? DEFAULT_DISPLAY_NAME;
 }
 
+/**
+ * The values the cursor variable is on for. A variable is a string, so a boolean option that
+ * takes one has to say which strings mean yes; everything else, an empty value included, is off.
+ */
+const TRUE_VALUES: readonly string[] = ['1', 'true', 'yes', 'on'];
+
+/**
+ * Whether this seat publishes a cursor: the argument, then the variable, then off. An argument
+ * beats the variable, an explicit `false` included.
+ */
+function publishCursor(args: Readonly<Record<string, unknown>>, env: Environment): boolean {
+  const value = args['publish_cursor'];
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const variable = env[PUBLISH_CURSOR_VARIABLE];
+  return variable !== undefined && TRUE_VALUES.includes(variable.trim().toLowerCase());
+}
+
 function objectSchema(
   properties: Readonly<Record<string, JsonSchema>>,
   required: readonly string[] = [],
@@ -143,11 +165,17 @@ function seat(participant: Participant): string {
   return `${participant.displayName} (${marks.join(', ')})`;
 }
 
+/** The `publish_cursor` argument both session tools carry, so the two say the same thing. */
+const PUBLISH_CURSOR_ARGUMENT: JsonSchema = {
+  type: 'boolean',
+  description: `Whether this seat publishes a cursor for the path each read, edit and write touches, so another seat can see which file this agent is working in and where. Off by default; the ${PUBLISH_CURSOR_VARIABLE} variable is the fallback.`,
+};
+
 function hostTool(session: Session, env: Environment): ToolDefinition {
   return {
     name: 'session_host',
     description:
-      "Share a folder with a room and host it. The folder is walked once, here: the paths the walk finds are the room's listing, and only a file the folder holds at that moment can be listed, so a file that appears in the folder later is not listed until a new session, because nothing republishes the listing — and a host cannot create a file its folder does not already hold. Answers with the room id, the number of granted paths, and the complete invite URL including the key in its fragment, which is a credential for whoever should join. A host leaving closes the room for everyone. Takes the folder, the server address, and a display name.",
+      "Share a folder with a room and host it. The folder is walked once, here: the paths the walk finds are the room's listing, and only a file the folder holds at that moment can be listed, so a file that appears in the folder later is not listed until a new session, because nothing republishes the listing — and a host cannot create a file its folder does not already hold. Answers with the room id, the number of granted paths, and the complete invite URL including the key in its fragment, which is a credential for whoever should join. A host leaving closes the room for everyone. Takes the folder, the server address, a display name, and whether to publish a cursor.",
     inputSchema: objectSchema(
       {
         folder: {
@@ -162,6 +190,7 @@ function hostTool(session: Session, env: Environment): ToolDefinition {
           type: 'string',
           description: `The name this seat shows in the room. Falls back to the ${DISPLAY_NAME_VARIABLE} variable, then to "${DEFAULT_DISPLAY_NAME}".`,
         },
+        publish_cursor: PUBLISH_CURSOR_ARGUMENT,
       },
       ['folder'],
     ),
@@ -182,6 +211,7 @@ function hostTool(session: Session, env: Environment): ToolDefinition {
           root: folder,
           serverUrl,
           displayName: displayName(args, env),
+          publishCursor: publishCursor(args, env),
         });
         const cut =
           hosted.cut === undefined
@@ -203,7 +233,7 @@ function joinTool(session: Session, env: Environment): ToolDefinition {
   return {
     name: 'session_join',
     description:
-      "Join a room from an invite URL, which has to carry the key in its fragment. Answers with the room id, this seat's role, the participants and how many paths the host granted. The listing is what the host shared when the room opened, so a path shared afterwards is not in it until a new session. A guest edits the room's shared text and writes nothing to its own disk. Takes the invite and a display name.",
+      "Join a room from an invite URL, which has to carry the key in its fragment. Answers with the room id, this seat's role, the participants and how many paths the host granted. The listing is what the host shared when the room opened, so a path shared afterwards is not in it until a new session. A guest edits the room's shared text and writes nothing to its own disk. Takes the invite, a display name, and whether to publish a cursor.",
     inputSchema: objectSchema(
       {
         invite: {
@@ -215,6 +245,7 @@ function joinTool(session: Session, env: Environment): ToolDefinition {
           type: 'string',
           description: `The name this seat shows in the room. Falls back to the ${DISPLAY_NAME_VARIABLE} variable, then to "${DEFAULT_DISPLAY_NAME}".`,
         },
+        publish_cursor: PUBLISH_CURSOR_ARGUMENT,
       },
       ['invite'],
     ),
@@ -223,6 +254,7 @@ function joinTool(session: Session, env: Environment): ToolDefinition {
         const joined = await session.join({
           invite: argText(args, 'invite'),
           displayName: displayName(args, env),
+          publishCursor: publishCursor(args, env),
         });
         return answer(
           [
@@ -504,7 +536,7 @@ function participantsTool(session: Session): ToolDefinition {
   return {
     name: 'list_participants',
     description:
-      'List the seats in the room: each display name, its role, whether it is this connection, and whether a cursor is published. This server never publishes a cursor of its own, so presence is only what peers say. The roster is as current as the last event from the room, so a seat that has just arrived or left may still be reported as it was.',
+      'List the seats in the room: each display name, its role, whether it is this connection, and whether a cursor is published. This server publishes one only when a session was opened with "publish_cursor", so its own seat shows a cursor only then; otherwise presence is only what peers say. The roster is as current as the last event from the room, so a seat that has just arrived or left may still be reported as it was.',
     inputSchema: objectSchema({}),
     async handler() {
       return await guarded(async () => {
