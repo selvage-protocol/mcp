@@ -12,7 +12,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { type TestContext } from 'node:test';
 
-import { StdioServer, assertMessagesOnly } from './helpers/stdio-client.ts';
+import { ENTRY, StdioServer, assertMessagesOnly } from './helpers/stdio-client.ts';
+import { put, remove, scratch } from './helpers/scratch.ts';
+
+/** The preload that gives a child process a live session: see `helpers/live-engine.ts`. */
+const LIVE_ENGINE = new URL('./helpers/live-engine.ts', import.meta.url).href;
 
 /** The version the server should announce, from the package rather than from this file. */
 const PACKAGE_VERSION = (
@@ -280,4 +284,73 @@ test('end of input shuts the server down with nothing left unflushed', async (t)
   assert.deepEqual(exit, { code: 0, signal: null }, server.report());
   assert.equal(assertMessagesOnly(server.rawStdout()).length, 1);
   await server.waitForDiagnostic('stdin closed', 'the shutdown diagnostic');
+});
+
+test('end of input on a live session leaves it, and the process follows its client out', async (t) => {
+  // The engine's socket is not `unref`ed, so a process that holds a session and never leaves it
+  // outlives the client that closed stdin. `helpers/live-engine.ts` gives this child a room whose
+  // connection is a timer only leaving can clear, which is that socket's shape: exit here means
+  // the session was left, and no exit means the process outlived its client.
+  const server = StdioServer.startCommand(process.execPath, ['--import', LIVE_ENGINE, ENTRY]);
+  t.after(() => server.stop());
+  const folder = await scratch('stdio-live');
+  t.after(() => remove(folder));
+  await put(folder, 'a.txt', 'one\n');
+
+  server.send(initialize(1, '2025-11-25'));
+  await server.nextResult(1, 'the initialize result');
+  server.send({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'session_host',
+      arguments: { folder, server_url: 'ws://room.example' },
+    },
+  });
+  const hosted = (await server.nextResult(2, 'the session_host result')) as {
+    readonly isError?: unknown;
+    readonly content?: readonly { readonly text?: unknown }[];
+  };
+  assert.equal(hosted.isError, undefined, JSON.stringify(hosted));
+  assert.match(String(hosted.content?.[0]?.text), /room-1/, 'the session under test is live');
+
+  const exit = await server.close();
+  assert.deepEqual(exit, { code: 0, signal: null }, server.report());
+  await server.waitForDiagnostic('leaving the session', 'the shutdown of the live session');
+  assert.equal(assertMessagesOnly(server.rawStdout()).length, 2);
+});
+
+test('a room that never answers is bounded, and the process still follows its client out', async (t) => {
+  const server = StdioServer.startCommand(
+    process.execPath,
+    ['--import', LIVE_ENGINE, ENTRY],
+    { env: { ...process.env, SELVAGE_TEST_ENGINE_STUCK: '1' } },
+  );
+  t.after(() => server.stop());
+  const folder = await scratch('stdio-stuck');
+  t.after(() => remove(folder));
+  await put(folder, 'a.txt', 'one\n');
+
+  server.send(initialize(1, '2025-11-25'));
+  await server.nextResult(1, 'the initialize result');
+  server.send({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'session_host',
+      arguments: { folder, server_url: 'ws://room.example' },
+    },
+  });
+  assert.equal(
+    ((await server.nextResult(2, 'the session_host result')) as { readonly isError?: unknown }).isError,
+    undefined,
+  );
+
+  // The leave never comes back, so the deadline is what ends the process — with a failed exit and
+  // the sentence saying why, rather than outliving the client that closed the pipe.
+  const exit = await server.close();
+  assert.deepEqual(exit, { code: 1, signal: null }, server.report());
+  await server.waitForDiagnostic('the room did not answer within 2000 ms', 'the bound diagnostic');
 });
