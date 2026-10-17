@@ -312,34 +312,56 @@ test('a host keeps its own folder true to an edit it applied, and a guest writes
   try {
     await put(root, 'a.txt', 'one\n');
     const walked = await enumerateGrant(root);
+    // `onText` is the room's own text being read by a write-back, which is the point a write-back
+    // has looked at both sides of the comparison it decides with.
+    let echoed = 0;
     const engine = new StubEngine({
       role: 'host',
       invite: INVITE,
       listing: walked.paths,
       documents: ['a.txt'],
       texts: new Map([['a.txt', 'one\n']]),
+      onText: () => {
+        echoed += 1;
+      },
     });
     const { session } = await hostOver(root, engine);
 
     const outcome = await session.write('a.txt', 'two\n');
     assert.equal(outcome.disk, 'written');
     assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'two\n');
-    // The room's own echo of that edit is not a second write.
+    // The room's own echo of that edit is not a second write, and the assertion is made after the
+    // write-back it starts has read the room rather than beside it: an echo that had a problem to
+    // record or a second write to make would have made it by this point.
+    const beforeEcho = echoed;
     engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    await until('the room\'s echo to be read', () => echoed, (seen) => seen > beforeEcho, 1_000);
     assert.deepEqual(session.status().problems, []);
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'two\n');
 
     // A guest has no folder of its own, so an incoming change is a document and nothing else.
+    let guestReads = 0;
     const guestEngine = new StubEngine({
       listing: ['a.txt'],
       documents: ['a.txt'],
       texts: new Map([['a.txt', 'one\n']]),
+      onText: () => {
+        guestReads += 1;
+      },
     });
     const guest = new Session({ engines: new StubFactory(guestEngine) });
     await guest.join({ invite: INVITE, displayName: 'agent' });
     guestEngine.remote('a.txt', 'from the room\n');
     guestEngine.emit({ type: 'documentChanged', path: 'a.txt' });
+    // The host's own echo, landed after the guest's change, is the clock for the guest's step:
+    // its write-back is answered in the turn it is queued in, before it could ask the room for
+    // anything, so a host write-back that has since read the folder is long past it.
+    const beforeGuest = echoed;
+    engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    await until('the host\'s later echo to be read', () => echoed, (seen) => seen > beforeGuest, 1_000);
     assert.deepEqual(guest.status().problems, []);
     assert.deepEqual(guestEngine.calls.filter((call) => /^(open|insert|delete)/.test(call)), []);
+    assert.equal(guestReads, 0, 'a guest asks the room for no text, having no folder to write it to');
     assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'two\n');
   } finally {
     await remove(root);
