@@ -170,6 +170,26 @@ test('a refusal read back from an invite carries no fragment', async () => {
   assert.equal(session.hasSession(), false);
 });
 
+test('a join asked for with nothing to dial reads back as the failure it was', async () => {
+  const factory = new StubFactory();
+  factory.joinError = new Error('nothing to dial');
+  const session = new Session({ engines: factory });
+
+  // An invite of nothing is what an empty or whitespace `invite` trims to, and there is no key
+  // in it to take out: a masking that split on the empty string would put `[invite]` between
+  // every character of the message instead.
+  await assert.rejects(
+    session.join({ invite: '   ', displayName: 'agent' }),
+    (error: unknown) => {
+      assert.ok(error instanceof SessionRefused);
+      assert.equal(error.code, 'join-failed');
+      assert.equal(error.message, 'nothing to dial');
+      return true;
+    },
+  );
+  assert.equal(session.hasSession(), false);
+});
+
 test('participants carry the room\'s names and roles, and awareness only where it was published', async () => {
   const ada = peer('p-ada', 'ada', 'host', 7);
   const engine = new StubEngine({
