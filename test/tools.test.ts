@@ -572,3 +572,81 @@ test('session_leave frees the process, and a second leave is a caller error', as
   const again = failed(await call(benchmark, 'session_leave'));
   assert.match(again, /there is no live session/);
 });
+
+/** Every cursor publication an engine was asked for. */
+function publishes(engine: StubEngine): string[] {
+  return engine.calls.filter((call) => call.startsWith('setSelection'));
+}
+
+/** A guest whose room holds one path, so a read has something to point at. */
+function guestRoom(): StubEngine {
+  return new StubEngine({
+    role: 'guest',
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one\n']]),
+  });
+}
+
+/** Joins, reads the one path, and answers with the bench so its engine can be inspected. */
+async function joinedAndRead(
+  args: Record<string, unknown>,
+  env: Record<string, string | undefined> = {},
+): Promise<Bench> {
+  const benchmark = bench({ engine: guestRoom(), env, session: { grantWaitMs: 0 } });
+  await call(benchmark, 'session_join', { invite: INVITE, ...args });
+  await call(benchmark, 'read_file', { path: 'a.txt' });
+  return benchmark;
+}
+
+test('the cursor is published only when the argument or the variable asks for it', async () => {
+  assert.deepEqual(
+    publishes((await joinedAndRead({})).engine),
+    [],
+    'a default join published a cursor',
+  );
+
+  assert.deepEqual(
+    publishes((await joinedAndRead({ publish_cursor: true })).engine),
+    ['setSelection a.txt 0..0'],
+  );
+
+  assert.deepEqual(
+    publishes((await joinedAndRead({}, { SELVAGE_PUBLISH_CURSOR: 'on' })).engine),
+    ['setSelection a.txt 0..0'],
+  );
+
+  // The variable is the fallback, so an argument beats it — an explicit `false` included.
+  assert.deepEqual(
+    publishes((await joinedAndRead({ publish_cursor: false }, { SELVAGE_PUBLISH_CURSOR: '1' })).engine),
+    [],
+  );
+
+  // The variable's off spellings, and a value that is neither on nor off.
+  for (const value of ['0', 'false', 'no', 'off', 'maybe', '']) {
+    assert.deepEqual(
+      publishes((await joinedAndRead({}, { SELVAGE_PUBLISH_CURSOR: value })).engine),
+      [],
+      `${JSON.stringify(value)} is not on`,
+    );
+  }
+});
+
+test('session_host carries the cursor choice to the session too', async () => {
+  const root = await scratch('tools-cursor-host');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const benchmark = bench();
+    await call(benchmark, 'session_host', {
+      folder: root,
+      server_url: 'ws://room.example',
+      publish_cursor: true,
+    });
+    // The stub's room is whatever the test says it is; the walk's listing is the session's own.
+    benchmark.engine.listing = ['a.txt'];
+    await call(benchmark, 'read_file', { path: 'a.txt' });
+    assert.deepEqual(publishes(benchmark.engine), ['setSelection a.txt 0..0']);
+  } finally {
+    await remove(root);
+  }
+});

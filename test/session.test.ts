@@ -11,6 +11,7 @@ import { Session, SessionRefused } from '../src/session.ts';
 import type { SessionRefusal } from '../src/session.ts';
 import { StubEngine, StubFactory, peer } from './helpers/stub-engine.ts';
 import { put, remove, scratch } from './helpers/scratch.ts';
+import { until } from './helpers/until.ts';
 
 /** A link of the shape §5.1 writes: the page's or the wire's, with both keys in the fragment. */
 const INVITE = `ws://room.example/session?room=room-1&token=tok-1#k=${'a'.repeat(43)}&h=${'b'.repeat(43)}`;
@@ -487,7 +488,112 @@ test('the room\'s own events are what the session reports about itself', async (
   engine.emit({ type: 'roomGone', reason: 'the host left' });
   assert.equal(session.status().live, false);
 
-  // A rename is the whole of the presence this seat publishes.
+  // A rename is the identity this seat publishes; the cursor is the other half, and only when
+  // the session was opened for it.
   await session.rename('somebody else');
   assert.equal(engine.calls.includes('rename somebody else'), true);
+});
+
+/**
+ * The cursor, which is off unless the session asks for it. A read names the start of the file
+ * because that is the only place a read can honestly point at, and an edit names the end of the
+ * range it changed, which is where the edit happened.
+ */
+test('a read with the cursor on publishes a caret at the start of the file', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'hello\n']]),
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent', publishCursor: true });
+
+  await session.read('a.txt');
+
+  assert.deepEqual(
+    engine.calls.filter((call) => call.startsWith('setSelection')),
+    ['setSelection a.txt 0..0'],
+  );
+});
+
+test('an edit with the cursor on publishes the end of the range it changed', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent', publishCursor: true });
+
+  await session.edit('a.txt', { start: 0, end: 3, text: '1' });
+
+  // `one` became `1`, so the change is [0, 1) and the caret lands at its end.
+  assert.deepEqual(
+    engine.calls.filter((call) => call.startsWith('setSelection')),
+    ['setSelection a.txt 1..1'],
+  );
+});
+
+test('a write with the cursor on publishes the end of the range it changed', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'old\n']]),
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent', publishCursor: true });
+
+  await session.write('a.txt', 'new\n');
+
+  // `old` became `new`: the smallest change is [0, 3), and the caret lands at its end.
+  assert.deepEqual(
+    engine.calls.filter((call) => call.startsWith('setSelection')),
+    ['setSelection a.txt 3..3'],
+  );
+});
+
+test('a published cursor is renewed on the room\'s clock and stops when the session ends', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'hello\n']]),
+    keepalive: { ping_interval_ms: 1_000, awareness_renew_ms: 25, awareness_expire_ms: 50 },
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent', publishCursor: true });
+  await session.read('a.txt');
+
+  const published = (): number =>
+    engine.calls.filter((call) => call === 'setSelection a.txt 0..0').length;
+  assert.equal(published(), 1, 'the read published once');
+  // The room advertises a 25 ms renewal window, so a 2 s deadline is eighty of them: three
+  // publishes cannot be the one the read made.
+  await until('the cursor to be renewed more than once', published, (count) => count >= 3, 2_000);
+
+  await session.leave();
+  const atLeave = published();
+  assert.equal(engine.calls.includes('setAwareness null'), true, 'leaving left the caret behind');
+  // Seven windows with no renewal: a timer that outlived the leave would have published again.
+  await new Promise((settle) => setTimeout(settle, 175));
+  assert.equal(published(), atLeave, 'the renewal outlived the session');
+});
+
+test('with the cursor off a read and an edit publish nothing at all', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent' });
+  await session.read('a.txt');
+  await session.edit('a.txt', { start: 0, end: 3, text: '1' });
+  await session.leave();
+
+  assert.deepEqual(
+    engine.calls.filter(
+      (call) => call.startsWith('setSelection') || call.startsWith('setAwareness'),
+    ),
+    [],
+  );
 });
