@@ -224,6 +224,93 @@ test('a host holds a shared path once when its own read seeds it', { timeout: ST
   }
 });
 
+
+/**
+ * The other shape that asks for one document twice: a **guest** reading a path the room has not
+ * delivered, with the host reading it too. A guest's read is a hold, and a hold on a path nothing
+ * has arrived for is what makes the host seed it — so the guest's ask and the host's own ask are
+ * the room's two callers of one seed, and either order of them has to leave one copy. The live
+ * session this came from had two seats besides the host, so a third seat does the counting here:
+ * its read is never the ask that seeds anything, because the document is in the room by then.
+ *
+ * The last path is asked for by both at once, which is the window a seed is in flight for. Every
+ * assertion is the whole text and the number of times it appears: a room holding it twice answers
+ * with it twice, and the folder follows the room.
+ */
+test('a guest\'s read and the host\'s own read of one path leave it once', { timeout: STEP_MS * 2 }, async (t) => {
+  const selvaged = await RealSelvaged.start();
+  t.after(async () => {
+    await selvaged.stop();
+  });
+
+  const hostFolder = await scratch('e2e-ask-host');
+  const guestFolder = await scratch('e2e-ask-guest');
+  const otherFolder = await scratch('e2e-ask-other');
+  const body = 'FizzBuzz, with one branch\nsecond line here\n';
+  const paths = ['one.txt', 'two.txt', 'three.txt'];
+  for (const path of paths) {
+    await put(hostFolder, path, body);
+  }
+
+  const host = await Tool.start(t, 'host', {
+    cwd: hostFolder,
+    env: { ...process.env, SELVAGE_SERVER_URL: selvaged.wsBase, SELVAGE_DISPLAY_NAME: 'ada' },
+  });
+  const guest = await Tool.start(t, 'guest', {
+    cwd: guestFolder,
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'grace' },
+  });
+  const other = await Tool.start(t, 'other', {
+    cwd: otherFolder,
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'heidi' },
+  });
+
+  const hosted = await host.call('session_host', { folder: hostFolder });
+  const room = roomIdOf(hosted);
+  const invite = inviteOf(hosted);
+  for (const seat of [guest, other]) {
+    const joined = await seat.call('session_join', { invite });
+    assert.ok(joined.includes(room), `a seat joined another room: ${joined}`);
+  }
+  await until(
+    'the host to see three seats',
+    () => host.raw('session_status'),
+    (text) => /^participants: 3$/m.test(text),
+    STEP_MS,
+  );
+
+  // The guest asks first and the host asks after: the room's event seeds for the guest's hold, and
+  // the host's own read is the second ask for the same document.
+  await guest.call('read_file', { path: 'one.txt' });
+  assert.equal(await host.call('read_file', { path: 'one.txt' }), body, 'the host read something else');
+
+  // The host asks first, and a guest asks after: the host's own read is the seed, and the guest's
+  // hold arrives while the room already has the text.
+  assert.equal(await host.call('read_file', { path: 'two.txt' }), body, 'the host read something else');
+  assert.equal(await guest.call('read_file', { path: 'two.txt' }), body, 'the guest read something else');
+
+  // Both at once, which is the window the seed's folder read is open for.
+  const both = await Promise.all([
+    host.call('read_file', { path: 'three.txt' }),
+    guest.call('read_file', { path: 'three.txt' }),
+  ]);
+  for (const text of both) {
+    assert.equal(text, body, 'a concurrent read answered with something else');
+  }
+
+  // What the room holds, read by a seat that never asked for any of it, and what the folder holds.
+  for (const path of paths) {
+    const inRoom = await other.call('read_file', { path });
+    assert.equal(inRoom, body, `the room holds ${path} as something other than the file text`);
+    assert.equal(
+      inRoom.split(body).length - 1,
+      1,
+      `the room holds ${path} ${inRoom.split(body).length - 1} times`,
+    );
+    const onDisk = await readFile(join(hostFolder, path), 'utf8');
+    assert.equal(onDisk, body, `the host's folder holds ${path} as something else`);
+  }
+});
 /**
  * The proof is required, so the two ways of not having a server are failures with something to
  * act on rather than skips: a binary that is not there names the command that builds one, and a
