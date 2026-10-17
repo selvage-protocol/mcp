@@ -40,6 +40,7 @@ import { MAX_HUNK_LINES, positionAt, renderHunk } from './changes.ts';
 import type { Position } from './changes.ts';
 import { enumerateGrant, readGrantedFile, writeGrantedFile } from './grant.ts';
 import type { GrantCut } from './grant.ts';
+import { pageLink } from './invite.ts';
 
 /**
  * Why a session refused to do what it was asked. The first four are the session's own state, the
@@ -206,11 +207,18 @@ export interface SessionStatus {
   readonly problems: readonly SessionProblem[];
 }
 
-/** What hosting answered with. `inviteUrl` is the credential: it belongs to the caller. */
+/**
+ * What hosting answered with. Both links carry the same key in their fragment, and the fragment
+ * is the credential: `inviteUrl` is the form a client joins with, `pageUrl` the form a person
+ * opens in a browser.
+ */
 export interface HostedSession {
   readonly roomId: string;
   readonly role: Role;
+  /** The client invite: `ws(s)://…/session`, what `session_join` takes. */
   readonly inviteUrl: string;
+  /** The page link: `http(s)://…/`, what a person opens. */
+  readonly pageUrl: string;
   readonly paths: readonly string[];
   readonly cut: GrantCut | undefined;
   readonly participants: readonly Participant[];
@@ -500,6 +508,7 @@ export class Session {
       roomId: engine.session().roomId,
       role: engine.session().role,
       inviteUrl: invite,
+      pageUrl: pageLink(invite),
       paths: walked.paths,
       cut: walked.cut,
       participants: this.participants(),

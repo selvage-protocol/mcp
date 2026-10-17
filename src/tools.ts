@@ -236,7 +236,7 @@ function hostTool(session: Session, env: Environment): ToolDefinition {
   return {
     name: 'session_host',
     description:
-      "Share a folder with a room and host it. The folder is walked once, here: the paths the walk finds are the room's listing, and only a file the folder holds at that moment can be listed, so a file that appears in the folder later is not listed until a new session, because nothing republishes the listing — and a host cannot create a file its folder does not already hold. Answers with the room id, the number of granted paths, and the complete invite URL including the key in its fragment, which is a credential for whoever should join. A host leaving closes the room for everyone. Takes the folder, the server address, a display name, and the two opt-ins: whether to publish a cursor, and whether to tell the client about room activity as it happens.",
+      "Share a folder with a room and host it, and answer with the two links that open it. The folder is walked once, here: the paths the walk finds are the room's listing, and only a file the folder holds at that moment can be listed, so a file that appears in the folder later is not listed until a new session, because nothing republishes the listing — and a host cannot create a file its folder does not already hold. A person opens the page link in a browser; a client — another session_join included — joins with the client invite, and either form works. Both links carry the same room, token and key fragment, and the fragment is the credential: hand a link, whole, only to whoever should join. A host leaving closes the room for everyone. Takes the folder, the server address, a display name, and the two opt-ins: whether to publish a cursor, and whether to tell the client about room activity as it happens.",
     inputSchema: objectSchema(
       {
         folder: {
@@ -283,7 +283,8 @@ function hostTool(session: Session, env: Environment): ToolDefinition {
         return answer(
           [
             `hosting room ${hosted.roomId} as ${hosted.role}, with ${hosted.paths.length} granted path(s)${cut}.`,
-            `invite: ${hosted.inviteUrl}`,
+            `page: ${hosted.pageUrl} — a person opens this in a browser`,
+            `invite: ${hosted.inviteUrl} — a client joins with this, and session_join takes it`,
             `participants: ${hosted.participants.length}`,
           ].join('\n'),
         );
@@ -296,13 +297,13 @@ function joinTool(session: Session, env: Environment): ToolDefinition {
   return {
     name: 'session_join',
     description:
-      "Join a room from an invite URL, which has to carry the key in its fragment. Answers with the room id, this seat's role, the participants and how many paths the host granted. The listing is what the host shared when the room opened, so a path shared afterwards is not in it until a new session. A guest edits the room's shared text and writes nothing to its own disk. Takes the invite, a display name, and the two opt-ins: whether to publish a cursor, and whether to tell the client about room activity as it happens.",
+      "Join a room from an invite URL in either form session_host answered with — the page link a person would open, or the client invite — which has to carry the key in its fragment. Answers with the room id, this seat's role, the participants and how many paths the host granted. The listing is what the host shared when the room opened, so a path shared afterwards is not in it until a new session. A guest edits the room's shared text and writes nothing to its own disk. Takes the invite, a display name, and the two opt-ins: whether to publish a cursor, and whether to tell the client about room activity as it happens.",
     inputSchema: objectSchema(
       {
         invite: {
           type: 'string',
           description:
-            'The invite URL a host handed out, fragment and all. That fragment is a credential.',
+            'Either invite form a host handed out, fragment and all: the page link a person opens (`http(s)://…/`) or the client invite (`ws(s)://…/session`). That fragment is a credential.',
         },
         display_name: {
           type: 'string',

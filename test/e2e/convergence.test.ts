@@ -28,7 +28,7 @@ function roomIdOf(hosted: string): string {
 }
 
 function inviteOf(hosted: string): string {
-  const match = /^invite: (\S+)$/m.exec(hosted);
+  const match = /^invite: (\S+)/m.exec(hosted);
   assert.ok(match !== null, `session_host answered no invite URL: ${hosted}`);
   return match[1] as string;
 }
