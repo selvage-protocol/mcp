@@ -388,6 +388,57 @@ test('a guest that joins after the host seeded a path is answered from the room'
 });
 
 /**
+ * What the option is for: a person in the room can see where the agent is working. The host asks
+ * for a cursor through the variable — the configuration a client writes down — and reads a shared
+ * file; the guest, which never asked for one, sees the host's seat publish a cursor and its own
+ * seat still without one.
+ */
+test('a guest sees the host\'s cursor once the host asks for one', { timeout: STEP_MS * 2 }, async (t) => {
+  const selvaged = await RealSelvaged.start();
+  t.after(async () => {
+    await selvaged.stop();
+  });
+
+  const hostFolder = await scratch('e2e-cursor-host');
+  await put(hostFolder, 'a.txt', 'ada types here\n');
+
+  const host = await Tool.start(t, 'host', {
+    cwd: hostFolder,
+    env: {
+      ...process.env,
+      SELVAGE_SERVER_URL: selvaged.wsBase,
+      SELVAGE_DISPLAY_NAME: 'ada',
+      SELVAGE_PUBLISH_CURSOR: '1',
+    },
+  });
+  const guest = await Tool.start(t, 'guest', {
+    cwd: await scratch('e2e-cursor-guest'),
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'grace' },
+  });
+
+  const hosted = await host.call('session_host', { folder: hostFolder });
+  const joined = await guest.call('session_join', { invite: inviteOf(hosted) });
+  assert.ok(joined.includes(roomIdOf(hosted)), `the guest joined another room: ${joined}`);
+  await until(
+    'the host to see the guest',
+    () => host.raw('session_status'),
+    (text) => /^participants: 2$/m.test(text),
+    STEP_MS,
+  );
+
+  // The read is what puts the cursor on the path; before it the host publishes only its identity.
+  await host.call('read_file', { path: 'a.txt' });
+
+  const seats = await until(
+    "the guest to see the host's cursor",
+    () => guest.raw('list_participants'),
+    (text) => text.includes('ada (host, publishes a cursor)'),
+    STEP_MS,
+  );
+  assert.match(seats, /grace \(guest, this connection, no cursor seen\)/);
+});
+
+/**
  * The proof is required, so the two ways of not having a server are failures with something to
  * act on rather than skips: a binary that is not there names the command that builds one, and a
  * binary that will not listen names what it did say instead of leaving a wait to run out.
