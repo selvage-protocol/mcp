@@ -298,3 +298,51 @@ test('a write into the shared folder resolves the path itself, so a link swapped
     await remove(outside);
   }
 });
+
+test('a write lands the text it was given whole, and nothing of a longer one behind', async () => {
+  const root = await scratch('write-whole');
+  try {
+    // The text is read back rather than the write's answer taken for it, because the answer is
+    // what a write reported while the file is what the host's folder now holds. A write replaces
+    // the file rather than overwriting it in place, so the text written is the whole of it: none
+    // of a longer text before it may survive past the new one's end.
+    await put(root, 'a.txt', 'ada types here\n');
+    assert.deepEqual(await writeGrantedFile(root, 'a.txt', 'grace types here\n'), { kind: 'written' });
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'grace types here\n');
+
+    assert.deepEqual(await writeGrantedFile(root, 'a.txt', 'bo\n'), { kind: 'written' });
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'bo\n');
+
+    // And a longer text over that shorter one is the shorter one replaced in full.
+    assert.deepEqual(await writeGrantedFile(root, 'a.txt', 'a longer line again\n'), { kind: 'written' });
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'a longer line again\n');
+  } finally {
+    await remove(root);
+  }
+});
+
+test('a write reaches a nested path through the directories the folder holds', async () => {
+  const root = await scratch('write-nested');
+  const outside = await scratch('write-nested-outside');
+  try {
+    await put(root, 'sub/deep/x.txt', 'inside the folder\n');
+    await put(outside, 'x.txt', 'outside the folder\n');
+
+    assert.deepEqual(await writeGrantedFile(root, 'sub/deep/x.txt', 'from the room\n'), {
+      kind: 'written',
+    });
+    assert.equal(await readFile(join(root, 'sub/deep/x.txt'), 'utf8'), 'from the room\n');
+    assert.equal(await readFile(join(outside, 'x.txt'), 'utf8'), 'outside the folder\n');
+
+    // The leaf is a name of the directory that holds it, so a segment the folder does not hold is
+    // the same `missing` a name that is not there is, whether or not something outside holds it.
+    assert.deepEqual(await writeGrantedFile(root, 'sub/elsewhere/x.txt', 'from the room\n'), {
+      kind: 'refused',
+      cause: 'missing',
+    });
+    assert.equal(existsSync(join(root, 'sub/elsewhere')), false);
+  } finally {
+    await remove(root);
+    await remove(outside);
+  }
+});
