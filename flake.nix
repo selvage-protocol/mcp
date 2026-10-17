@@ -124,10 +124,27 @@
       in {
         typecheck = mkSuite "mcp-typecheck" [selvage.node] ["npm run typecheck"];
 
+        # The artifact `bin` names, and the shebang and the bit that make it the command it is.
+        # `npm test` builds it too, by way of `npm pack`; this is the check that fails fastest
+        # when the build is what broke.
+        build = mkSuite "mcp-build" [selvage.node] [
+          "npm run build"
+          "test -f dist/main.js"
+          "test -x dist/main.js"
+          "head -n 1 dist/main.js | grep -q '^#!/usr/bin/env node$'"
+        ];
+
         # `npm test` and not `npm run test:e2e` beside it: the two-process proof needs a built
         # `selvaged` from the sibling `reference_server` repository, and a sandbox has no sibling
         # checkout. `scripts/ci-local.sh e2e`, from a checkout that has one, runs it.
-        suite = mkSuite "mcp-suite" [selvage.node] ["npm test"];
+        #
+        # The build comes first because a checkout gets it from `npm ci`, which runs `prepare`,
+        # and this derivation gets its `node_modules` from the store instead of from an install:
+        # without it, the suite is a checkout whose `bin` names a file nothing has written.
+        suite = mkSuite "mcp-suite" [selvage.node] [
+          "npm run build"
+          "npm test"
+        ];
 
         pre-commit = selvage.hooks;
       }

@@ -35,12 +35,18 @@ jobs:
 
       - run: npm ci
 
+      # The artifact `bin` names, built by the script `prepare` runs. A broken build is red here,
+      # on its own line, rather than inside the suite that packs and installs it.
+      - run: npm run build
+
       - run: npm run typecheck
 
       # The suite the server's own processes can run. The two-process proof — two MCP servers
       # over their stdio, editing one room on a real `selvaged` — needs a built binary from the
       # sibling `reference_server` repository, which this job does not check out; `npm run
       # test:e2e` runs it, and `scripts/ci-local.sh e2e` runs it with the checkout's own gates.
+      # `test/packed.test.ts` packs this repository, installs the tarball outside it and drives
+      # the installed command, which needs npm and no network beyond what `npm ci` already did.
       # The flake's checks — and the `pre-commit` hook set it installs — need Nix, which this job
       # does not set up; `scripts/ci-local.sh checks` runs those on a machine that has it.
       - run: npm test
