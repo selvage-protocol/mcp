@@ -13,9 +13,17 @@
     "node": ">=22.18"
   },
   "bin": {
-    "selvage-mcp": "./src/main.ts"
+    "selvage-mcp": "./dist/main.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "test:e2e": "node --test test/e2e/*.test.ts"
@@ -30,6 +38,7 @@
     "@modelcontextprotocol/sdk": "1.32.1",
     "@types/node": "^26.6.4",
     "@types/ws": "8.18.2",
+    "esbuild": "^0.28.2",
     "typescript": "7.0.2"
   }
 }

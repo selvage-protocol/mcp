@@ -3,6 +3,10 @@ node_modules/
 .tmp-*/
 .pre-commit-config.yaml
 
+# The runnable artifact `npm run build` writes; `bin` names a file in it, and it is built rather
+# than committed, so `prepare` is what puts it in a tarball and what a git install runs.
+dist/
+
 # Sibling checkouts for parallel work on this repository.
 .worktrees/
 .notes/
