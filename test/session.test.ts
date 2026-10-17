@@ -413,6 +413,67 @@ test('a read the room never answers ends at its deadline, saying what it saw', a
   assert.equal(engine.calls.includes('close a.txt'), true);
 });
 
+/**
+ * The second half of the same wait. A connection whose key no state commits publishes nothing but
+ * its announcement (`§13.1`'s step 4) — the hold it just took included — so the room has not been
+ * asked for the document and owes no answer to it. `§7.1` lets the host that folds that
+ * announcement into its publish window take a whole `awareness_renew_ms` to send the state that
+ * commits the seat, and the document follows that state: a wait that starts on the document's own
+ * deadline instead refuses a hold the room would have answered.
+ */
+test('a read waits for the room to commit this seat before it times the document out', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    committed: false,
+    keepalive: { ping_interval_ms: 100, awareness_renew_ms: 200, awareness_expire_ms: 400 },
+    onOpen: (path, stub) => {
+      setTimeout(() => {
+        stub.committed = true;
+        stub.remote(path, 'from the room\n');
+        stub.emit({ type: 'documentChanged', path });
+      }, 120);
+    },
+  });
+  const session = new Session({ engines: new StubFactory(engine), documentWaitMs: 50 });
+  await session.join({ invite: INVITE, displayName: 'agent' });
+
+  const read = await session.read('a.txt');
+  assert.deepEqual(read, { path: 'a.txt', text: 'from the room\n' });
+  assert.deepEqual(
+    engine.calls.filter((call) => /^(open|close) /.test(call)),
+    ['open a.txt', 'close a.txt'],
+  );
+});
+
+/**
+ * The wait for the seat is bounded by the room's own clock and says which wait expired: a room
+ * that never commits this connection must not hold a read open for ever, and the sentence has to
+ * name what was missing rather than reporting the document's deadline for it.
+ */
+test('a seat the room never commits gives up on the room\'s clock, not the document\'s', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    committed: false,
+    keepalive: { ping_interval_ms: 100, awareness_renew_ms: 200, awareness_expire_ms: 400 },
+  });
+  const session = new Session({ engines: new StubFactory(engine), documentWaitMs: 20 });
+  await session.join({ invite: INVITE, displayName: 'agent' });
+
+  await assert.rejects(
+    session.read('a.txt'),
+    (error: unknown) => {
+      assert.ok(error instanceof SessionRefused);
+      assert.equal(error.code, 'timed-out');
+      assert.match(error.message, /1200 ms/);
+      assert.match(error.message, /awareness_renew_ms/);
+      return true;
+    },
+  );
+  assert.equal(engine.calls.includes('close a.txt'), true);
+});
+
 test('the room\'s own events are what the session reports about itself', async () => {
   const engine = new StubEngine({ listing: ['a.txt'] });
   const session = new Session({ engines: new StubFactory(engine) });
