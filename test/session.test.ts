@@ -88,6 +88,44 @@ test('a server address the engine cannot dial is refused before anything is open
   assert.equal(session.hasSession(), false);
 });
 
+test('a host the engine will not open is refused, without the address it was dialled at', async () => {
+  const root = await scratch('host-refused');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const address = 'ws://room.example';
+    const factory = new StubFactory();
+    factory.hostError = new Error(`the socket to ${address} did not open`);
+    const session = new Session({ engines: factory });
+
+    await assert.rejects(
+      session.host({ root, serverUrl: address, displayName: 'agent' }),
+      (error: unknown) => {
+        assert.ok(error instanceof SessionRefused);
+        assert.equal(error.code, 'host-failed');
+        assert.equal(error.message, 'the socket to [address] did not open');
+        return true;
+      },
+    );
+    assert.equal(session.hasSession(), false, 'a host that never came up holds nothing');
+
+    // An invite handed where an address belongs is a link with a key in its fragment, and this
+    // refusal is prose a caller may log: no part of it is repeated back.
+    await assert.rejects(
+      session.host({ root, serverUrl: INVITE, displayName: 'agent' }),
+      (error: unknown) => {
+        assert.ok(error instanceof SessionRefused);
+        assert.equal(error.code, 'not-a-server');
+        assert.doesNotMatch(error.message, /#k=/);
+        assert.doesNotMatch(error.message, /a{43}/);
+        assert.match(error.message, /\[address\]/);
+        return true;
+      },
+    );
+  } finally {
+    await remove(root);
+  }
+});
+
 test('a second host or join is refused, naming the live session, and leaving frees the process', async () => {
   const root = await scratch('busy');
   try {
