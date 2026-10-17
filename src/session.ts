@@ -63,7 +63,8 @@ export type SessionRefusal =
   | 'bad-change'
   | 'room-error'
   | 'write-failed'
-  | 'timed-out';
+  | 'timed-out'
+  | 'no-document';
 
 /** A refusal with a code a tool layer can act on, rather than a message it has to parse. */
 export class SessionRefused extends Error {
@@ -1081,6 +1082,13 @@ export class Session {
    * resolve every directory on the way with the same hold, which is the write side of the clamp —
    * and that refusal is kept in `problems` rather than swallowed.
    *
+   * A path this replica holds no document for is refused the same way, and for the same reason the
+   * rest of this class asks `engine.has` before it reads a text: the engine answers `''` for a path
+   * nothing has arrived for, and an empty document the room really holds is answered with `''` too
+   * (`§13.5`). The first is the absence of an answer, and a write-back that took it for the room's
+   * own would empty the folder's copy of the file, whole, with no further event coming to put it
+   * back.
+   *
    * The change waits for the write-back already in flight for the same path: two of them overlap
    * on a file each empties before it writes, which can leave one version's head under another's
    * tail, and the room's text is read here, when the wait is over, so the last change is the one
@@ -1097,6 +1105,14 @@ export class Session {
         const current = await readGrantedFile(root, path);
         if (current.kind === 'refused') {
           this.note(path, current.cause, `the room changed ${path}, which this folder will not resolve`);
+          return;
+        }
+        if (!engine.has(path)) {
+          this.note(
+            path,
+            'no-document',
+            `the room changed ${path} and this replica holds no document for it, so the folder was left alone`,
+          );
           return;
         }
         const text = engine.text(path);
