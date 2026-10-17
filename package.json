@@ -19,13 +19,15 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts"
   },
-  "devDependencies": {
-    "@types/node": "^26.6.4",
-    "@types/ws": "8.18.2",
+  "dependencies": {
     "lib0": "0.2.119",
-    "typescript": "7.0.2",
     "ws": "8.22.0",
     "y-protocols": "1.0.7",
     "yjs": "13.6.33"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
   }
 }
