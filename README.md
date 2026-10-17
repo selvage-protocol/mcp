@@ -19,11 +19,13 @@ You need:
 - A `selvaged` to connect to. Start one and note the address it prints.
 
 It is a stdio server — one JSON-RPC message per line — and its diagnostics go to stderr. There are
-two ways to start it, and they start the same program.
+two ways to start it, and they start the same program. An agent should have it configured in its
+client, not drive it by hand.
 
 **From a checkout.** `npm ci` installs the dependencies and builds the runnable artifact, because
 `prepare` runs `npm run build`: a bundle of the sources and the vendored engine, written to
-`dist/`. Point a client at it:
+`dist/`. Point a client at it — this is the `mcp.json` entry (`mcpServers` is the key every
+client reads):
 
 ```json
 {
@@ -41,6 +43,20 @@ two ways to start it, and they start the same program.
   }
 }
 ```
+
+`pi`'s own command line writes the same entry, which is the one-liner to hand an agent that runs
+under `pi`:
+
+```sh
+pi mcp add selvage \
+  --env SELVAGE_SERVER_URL=ws://127.0.0.1:8080 \
+  --env SELVAGE_DISPLAY_NAME=agent \
+  --cwd /path/to/mcp \
+  -- node /path/to/mcp/dist/main.js
+```
+
+`-l` writes `.pi/mcp.json` in the project rather than the global `~/.pi/agent/mcp.json`. Either
+way the server is a tool the client starts and the agent just calls.
 
 `dist/main.js` carries a shebang and the executable bit, so it is also the command `bin` names:
 `selvage-mcp` and `node <path>/dist/main.js` are the same process. `npm run build` alone rebuilds
@@ -92,10 +108,13 @@ nothing more: it says the last tool call landed there, not that the agent is loo
 A first session:
 
 1. Start `selvaged` and note the address it prints.
-2. Ask the agent to call `session_host` with the folder to share. It answers with the invite URL,
-   fragment and all.
-3. Hand that link to a person (`:SelvageJoin <invite>` in the Neovim client, or the VS Code one)
-   or to a second agent's `session_join`. The fragment is the room's key.
+2. Ask the agent to call `session_host` with the folder to share. It answers with two links, each
+   carrying the key fragment: `page:` is the link a person opens in a browser, and `invite:` is
+   the link a client joins with.
+3. Give a person the `page:` link (`:SelvageJoin <link>` in the Neovim client, or the VS Code one,
+   or a browser). Give a peer the `invite:` link, or paste either into `session_join` — both forms
+   name the same room, token and fragment. The fragment is the room's key, so hand out a link
+   only to whoever should join, and hand it over whole.
 4. Both read and edit the same files. A guest's edit arrives in the room and on the host's disk; a
    host's write arrives in every guest's `read_file`.
 5. To work live rather than poll, have the agent call `wait_for_change`: it blocks until the other
@@ -106,8 +125,8 @@ A first session:
 
 | | |
 |---|---|
-| `session_host` | Share a folder and host the room. The folder is walked once, here. Answers with the room id, the path count and the invite URL. |
-| `session_join` | Join a room from an invite URL, the fragment included. Answers with the room id, this seat's role, the participants and the path count. |
+| `session_host` | Share a folder and host the room. The folder is walked once, here. Answers with the room id, the path count, and two links that carry the same key fragment: a `page:` link a person opens in a browser and an `invite:` link a client joins with. |
+| `session_join` | Join a room from either link `session_host` answered with — the page link or the client invite, the fragment included — or from either form pasted. Answers with the room id, this seat's role, the participants and the path count. |
 | `session_status` | Where this server stands: room, role, mode, granted paths, open documents, participants, and any problem the session could not fix. Answers with no session too. |
 | `session_leave` | Leave the room and free the process to host or join again. A host leaving closes the room for everyone. |
 | `list_paths` | The room's shared paths, sorted, filtered by `prefix` and bounded by `limit`; a cut answer says it was cut and names the limit. |
@@ -188,9 +207,16 @@ is reported with its document and no position, rather than at a position this se
 - **A change names a path, never its author.** The engine reports that a document changed but not
   which peer changed it, so a wait or a notification says a path moved and never names the peer
   who moved it.
-- **The invite fragment is a credential.** It is the room's key, so an invite link is as sensitive
-  as the room itself: anything that holds the link can join and read what the host shares. A
-  failed join reports the URL as `[invite]` rather than echoing the key.
+- **The invite fragment is a credential.** Both links `session_host` answers with carry the same
+  room key in their fragment, so either one is as sensitive as the room itself: anything that holds
+  a link can join and read what the host shares. A failed join reports the URL as `[invite]`
+  rather than echoing the key.
+
+Which link goes to whom, in one place: the `page:` link is what a **person** opens — a browser
+fetches the client at the server's page root — and the `invite:` link is what a **client** dials,
+and what `session_join` takes. A person given the `invite:` form, or a client given the `page:`
+form, may still get in — the two are one invitation — but the page link is the one that opens as
+a page.
 
 ## Tests
 
