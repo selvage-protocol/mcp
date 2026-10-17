@@ -116,8 +116,12 @@ export class StdioServer {
   /**
    * The next line stdout produced. Resolves as soon as one is there rather than waiting for one
    * that never comes; the timeout kills the child, so a failed wait cannot leave a process behind.
+   *
+   * The bound is the caller's, because one wait is the room's own rather than this harness's: a
+   * read a joiner has to be committed before it can ask for can take the room's renewal window,
+   * which is longer than anything a unit test waits for.
    */
-  async nextLine(what: string): Promise<string> {
+  async nextLine(what: string, ms: number = WAIT_MS): Promise<string> {
     const queued = this.queued.shift();
     if (queued !== undefined) {
       return queued;
@@ -126,8 +130,8 @@ export class StdioServer {
       const timer = setTimeout(() => {
         this.waiter = undefined;
         this.child.kill('SIGKILL');
-        reject(new Error(`timed out after ${WAIT_MS}ms waiting for ${what}\n${this.report()}`));
-      }, WAIT_MS);
+        reject(new Error(`timed out after ${ms}ms waiting for ${what}\n${this.report()}`));
+      }, ms);
       this.waiter = (line) => {
         clearTimeout(timer);
         resolve(line);
@@ -136,8 +140,8 @@ export class StdioServer {
   }
 
   /** The next line, required to be the JSON-RPC response to `id`. */
-  async nextResponse(id: string | number, what: string): Promise<Record<string, unknown>> {
-    const line = await this.nextLine(what);
+  async nextResponse(id: string | number, what: string, ms: number = WAIT_MS): Promise<Record<string, unknown>> {
+    const line = await this.nextLine(what, ms);
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -156,8 +160,8 @@ export class StdioServer {
   }
 
   /** The `result` of the next response, failing on a response that carries an `error` instead. */
-  async nextResult(id: string | number, what: string): Promise<unknown> {
-    const response = await this.nextResponse(id, what);
+  async nextResult(id: string | number, what: string, ms: number = WAIT_MS): Promise<unknown> {
+    const response = await this.nextResponse(id, what, ms);
     assert.ok(!('error' in response), `expected a result, got ${JSON.stringify(response)}`);
     return response['result'];
   }

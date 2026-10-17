@@ -55,10 +55,14 @@ class Tool {
   }
 
   /** One `tools/call`, returning what it answered in band — a refusal included. */
-  async raw(name: string, args: Record<string, unknown> = {}): Promise<string> {
+  async raw(
+    name: string,
+    args: Record<string, unknown> = {},
+    ms: number = STEP_MS,
+  ): Promise<string> {
     const id = this.nextId++;
     this.server.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
-    const result = (await this.server.nextResult(id, `${name} on ${this.label}`)) as {
+    const result = (await this.server.nextResult(id, `${name} on ${this.label}`, ms)) as {
       readonly content?: readonly { readonly text?: string }[];
       readonly isError?: boolean;
     };
@@ -67,8 +71,8 @@ class Tool {
   }
 
   /** One `tools/call` that has to work. */
-  async call(name: string, args: Record<string, unknown> = {}): Promise<string> {
-    const text = await this.raw(name, args);
+  async call(name: string, args: Record<string, unknown> = {}, ms: number = STEP_MS): Promise<string> {
+    const text = await this.raw(name, args, ms);
     assert.ok(!text.startsWith('refused: '), `${name} on ${this.label} failed: ${text}`);
     return text;
   }
@@ -311,6 +315,78 @@ test('a guest\'s read and the host\'s own read of one path leave it once', { tim
     assert.equal(onDisk, body, `the host's folder holds ${path} as something else`);
   }
 });
+
+/**
+ * The room's **second** joiner, opening a path the host had already seeded before it arrived.
+ *
+ * `§13.1`'s step 4 leaves a connection whose key no state commits able to publish nothing but its
+ * announcement: the hold it takes on the path has not reached the room, and the `SyncStep1` that
+ * asks the room for what this replica lacks has not gone out — so nothing has been asked for,
+ * however much the room holds. `§7.1` lets a host fold that announcement into the publish window
+ * the state answering an earlier one opened, which is one `awareness_renew_ms` — fifteen seconds
+ * from `selvaged` — so the second joiner cannot ask for the document until that window closes. A
+ * read that gave up at a fixed five seconds refused a hold the room would have answered.
+ *
+ * Two joiners are needed to see it, and the suite had one: the *first* joiner is answered at once,
+ * because the state that answers its announcement is the one that opened the window.
+ */
+test('a guest that joins after the host seeded a path is answered from the room', { timeout: STEP_MS * 4 }, async (t) => {
+  const selvaged = await RealSelvaged.start();
+  t.after(async () => {
+    await selvaged.stop();
+  });
+
+  const hostFolder = await scratch('e2e-joiner-host');
+  const body = 'FizzBuzz, with one branch\nsecond line here\n';
+  await put(hostFolder, 'one.txt', body);
+
+  const host = await Tool.start(t, 'host', {
+    cwd: hostFolder,
+    env: { ...process.env, SELVAGE_SERVER_URL: selvaged.wsBase, SELVAGE_DISPLAY_NAME: 'ada' },
+  });
+  const first = await Tool.start(t, 'first', {
+    cwd: await scratch('e2e-joiner-first'),
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'grace' },
+  });
+  const second = await Tool.start(t, 'second', {
+    cwd: await scratch('e2e-joiner-second'),
+    env: { ...process.env, SELVAGE_DISPLAY_NAME: 'heidi' },
+  });
+
+  const hosted = await host.call('session_host', { folder: hostFolder });
+  const invite = inviteOf(hosted);
+  const joined = await first.call('session_join', { invite });
+  assert.match(joined, /^joined room /, `the first guest did not join: ${joined}`);
+  await until(
+    'the host to see two seats',
+    () => host.raw('session_status'),
+    (text) => /^participants: 2$/m.test(text),
+    STEP_MS,
+  );
+
+  // The host's own read is the seed, and the guest that was there for it is answered by the room.
+  assert.equal(await host.call('read_file', { path: 'one.txt' }), body, 'the host read something else');
+  assert.equal(await first.call('read_file', { path: 'one.txt' }), body, 'the first guest read something else');
+
+  // The second joiner arrives inside the window the host's answer to the first one opened.
+  const secondJoined = await second.call('session_join', { invite });
+  assert.match(secondJoined, /^joined room /, `the second guest did not join: ${secondJoined}`);
+  await until(
+    'the host to see three seats',
+    () => host.raw('session_status'),
+    (text) => /^participants: 3$/m.test(text),
+    STEP_MS,
+  );
+
+  const answer = await second.call('read_file', { path: 'one.txt' }, STEP_MS * 2);
+  assert.equal(answer, body, 'the second joiner was not answered from the room');
+
+  // One copy in the room and one in the folder: the wait neither doubled the text nor wrote one.
+  const inRoom = await host.call('read_file', { path: 'one.txt' });
+  assert.equal(inRoom.split(body).length - 1, 1, `the room holds the text ${inRoom.split(body).length - 1} times`);
+  assert.equal(await readFile(join(hostFolder, 'one.txt'), 'utf8'), body, "the host's folder holds something else");
+});
+
 /**
  * The proof is required, so the two ways of not having a server are failures with something to
  * act on rather than skips: a binary that is not there names the command that builds one, and a
