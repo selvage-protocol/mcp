@@ -380,6 +380,28 @@ class Listing implements SessionListing {
 }
 
 /**
+ * Runs `work` after whatever is already in flight for `path` in `map`, and remembers it as that
+ * path's turn. A second ask joins the one in flight rather than starting beside it; the entry is
+ * dropped only while it is still the one the map holds, so a chain that outlives a session
+ * neither answers the next session's ask for the same path nor clobbers its entry.
+ */
+function chain<T>(map: Map<string, Promise<void>>, path: string, work: () => Promise<T>): Promise<T> {
+  const previous = map.get(path) ?? Promise.resolve();
+  const next = previous.then(work, work);
+  const settled: Promise<void> = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  map.set(path, settled);
+  void settled.then(() => {
+    if (map.get(path) === settled) {
+      map.delete(path);
+    }
+  });
+  return next;
+}
+
+/**
  * One live session per process.
  *
  * A second host or join while one is live is refused and the refusal names what is live, because
@@ -401,6 +423,18 @@ export class Session {
   /** The write-back in flight per path, so two room changes for one path never write at once. */
   private readonly writing = new Map<string, Promise<void>>();
   /**
+   * The local edit in flight per path. Two edits of one path read the replica and publish a
+   * difference computed against what they read, so the second is held until the first has
+   * published rather than reading the text the first started from.
+   */
+  private readonly editing = new Map<string, Promise<void>>();
+  /**
+   * The session-level mutations, one at a time. The transport answers each request on its own, so
+   * a `session_host` and a `session_join` can be in flight together, and `assertFree` is a
+   * check-then-act across the walk and the engine call: without this both would open a room.
+   */
+  private mutation: Promise<void> = Promise.resolve();
+  /**
    * The watermark a wait reads: each path's text as of the last thing this session accounted
    * for, so a wait diffs against what the agent has already seen and not against where the
    * document happened to be when the wait was called. A local edit and a host's own seed move it
@@ -421,6 +455,8 @@ export class Session {
   private pendingListing = false;
   /** Waits blocked on a change, each asked again when the room moves. */
   private readonly waiters = new Set<() => void>();
+  /** Waits a session that is ending must settle, so none of them outlives its own room. */
+  private readonly waitEnders = new Set<() => void>();
   /** When a path was last announced, so one path cannot storm a client. */
   private readonly notifyLastAt = new Map<string, number>();
   private notifyWindow: number[] = [];
@@ -466,6 +502,10 @@ export class Session {
    * because a caller may have spelled it as an invite and a refusal is prose that can be logged.
    */
   async host(options: HostOptions): Promise<HostedSession> {
+    return await this.mutating(() => this.openHost(options));
+  }
+
+  private async openHost(options: HostOptions): Promise<HostedSession> {
     this.assertFree('host');
     const address = options.serverUrl.trim();
     const base = sessionBase(address);
@@ -501,7 +541,7 @@ export class Session {
     );
     const invite = engine.inviteUrl();
     if (invite === undefined) {
-      await this.leave();
+      await this.end();
       throw new SessionRefused('no-invite', 'the room came up without an invite to hand on');
     }
     return {
@@ -521,6 +561,10 @@ export class Session {
    * invite taken out of it, so that a diagnostic cannot carry the key.
    */
   async join(options: JoinOptions): Promise<JoinedSession> {
+    return await this.mutating(() => this.openJoin(options));
+  }
+
+  private async openJoin(options: JoinOptions): Promise<JoinedSession> {
     this.assertFree('join');
     const invite = options.invite.trim();
     let engine: SessionEngine;
@@ -572,6 +616,10 @@ export class Session {
    * process is free for the next session.
    */
   async leave(): Promise<void> {
+    await this.mutating(() => this.end());
+  }
+
+  private async end(): Promise<void> {
     const engine = this.requireLive('leaving');
     const mode = this.mode;
     this.stopCursorRenewal();
@@ -585,6 +633,7 @@ export class Session {
     this.problems.length = 0;
     this.seeding.clear();
     this.writing.clear();
+    this.editing.clear();
     this.baseline.clear();
     this.notifyBaseline.clear();
     this.lastPeers.clear();
@@ -593,7 +642,9 @@ export class Session {
     this.notifyLastAt.clear();
     this.notifyWindow = [];
     this.notifyEnabled = false;
-    this.waiters.clear();
+    // A wait cannot outlive the session it was watching: it is settled here with the report an
+    // ended wait carries, rather than being left to a deadline that would find no engine.
+    this.endWaits();
     try {
       if (published) {
         // The caret does not outlive the session: a state left behind would show a seat that is
@@ -683,7 +734,9 @@ export class Session {
    * session has kept since then, not against a snapshot taken now: a change that landed between
    * the last wait returning and this call is part of the report. It never spins — it is woken by
    * the room's own events and bounded by the deadline — and a deadline that passes says so
-   * rather than looking like a change.
+   * rather than looking like a change. Leaving the session under a wait settles it at once with
+   * the report an ended wait carries, rather than leaving it to a deadline that would find no
+   * room.
    */
   async waitForChange(options: WaitOptions): Promise<WaitReport> {
     const watch = options.paths;
@@ -692,6 +745,7 @@ export class Session {
     if (ready !== undefined) {
       return ready;
     }
+    const watched = [...new Set(watch ?? this.defaultWatch())];
     return await new Promise<WaitReport>((settle) => {
       let finished = false;
       let settling: NodeJS.Timeout | undefined;
@@ -705,6 +759,7 @@ export class Session {
         }
         clearTimeout(deadline);
         this.waiters.delete(wake);
+        this.waitEnders.delete(end);
         settle(report);
       };
       // One edit can arrive as more than one frame — a replacement is a delete and an insert —
@@ -728,7 +783,11 @@ export class Session {
         // reported rather than called a quiet room.
         finish(this.takeChanges(watch, includeRoster) ?? this.deadlineReport(watch, options.timeoutMs));
       }, options.timeoutMs);
+      const end = (): void => {
+        finish(this.endedReport(watched));
+      };
       this.waiters.add(wake);
+      this.waitEnders.add(end);
     });
   }
 
@@ -785,6 +844,10 @@ export class Session {
    * from `next` is that caller's own refusal and publishes nothing.
    */
   async transform(path: string, next: (replica: string) => string): Promise<EditOutcome> {
+    return await this.serializedEdit(path, () => this.editNow(path, next));
+  }
+
+  private async editNow(path: string, next: (replica: string) => string): Promise<EditOutcome> {
     const engine = this.requireLive('editing a document');
     if (engine.session().role === 'viewer') {
       throw new SessionRefused(
@@ -871,6 +934,7 @@ export class Session {
     this.problems.length = 0;
     this.seeding.clear();
     this.writing.clear();
+    this.editing.clear();
     this.stopCursorRenewal();
     this.cursorEnabled = publishCursor;
     this.cursor = undefined;
@@ -1052,24 +1116,31 @@ export class Session {
    * writing, and both would open the same leaf and empty it before writing to it — the file can
    * end up holding one version's head and another's tail, and an older text can be the one that
    * lands last, which leaves the host's folder diverged with no further event coming to fix it.
-   *
-   * A second ask joins the one in flight rather than starting beside it. The entry is dropped only
-   * while it is still the one the map holds, so a chain that outlives a session neither answers
-   * the next session's ask for the same path nor clobbers its entry.
    */
   private serialized<T>(path: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.writing.get(path) ?? Promise.resolve();
-    const next = previous.then(work, work);
-    const settled: Promise<void> = next.then(
+    return chain(this.writing, path, work);
+  }
+
+  /**
+   * One local edit of a path at a time: the second is held until the first has published, so it
+   * reads the replica the first left rather than the text both started from.
+   */
+  private serializedEdit<T>(path: string, work: () => Promise<T>): Promise<T> {
+    return chain(this.editing, path, work);
+  }
+
+  /**
+   * One session-level mutation at a time: `host`, `join` and `leave` each check what the process
+   * holds and then await the walk, the room or the disconnect, so two of them in flight would
+   * both pass the check. The chain is never rejected, which is why the next ask is not held back
+   * by a refusal that was the previous caller's own.
+   */
+  private mutating<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.mutation.then(work, work);
+    this.mutation = next.then(
       () => undefined,
       () => undefined,
     );
-    this.writing.set(path, settled);
-    void settled.then(() => {
-      if (this.writing.get(path) === settled) {
-        this.writing.delete(path);
-      }
-    });
     return next;
   }
 
@@ -1526,6 +1597,33 @@ export class Session {
     for (const wake of [...this.waiters]) {
       wake();
     }
+  }
+
+  /**
+   * Settles every wait a session that is ending was holding. It is the session that is gone and
+   * not the room, so the report says nothing about a connection that may come back.
+   */
+  private endWaits(): void {
+    for (const end of [...this.waitEnders]) {
+      end();
+    }
+    this.waitEnders.clear();
+  }
+
+  /** The report a wait gets when the session it was watching is left: nothing, and no deadline. */
+  private endedReport(watched: readonly string[]): WaitReport {
+    return {
+      changes: [],
+      peersChanged: false,
+      listingChanged: false,
+      timedOut: false,
+      ended: true,
+      omitted: 0,
+      watched: watched.length,
+      documents: 0,
+      participants: 0,
+      timeoutMs: 0,
+    };
   }
 
   /** Keeps a refusal nobody asked for, so that `status` can report a host that has fallen behind. */

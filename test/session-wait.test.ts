@@ -233,3 +233,26 @@ test('a room that stops being live ends a wait early rather than leaving it to i
   assert.equal(report.ended, true);
   assert.equal(report.timedOut, false);
 });
+
+test('leaving under a held wait settles it at once, rather than at a deadline with no room', { timeout: 5_000 }, async () => {
+  // The transport answers a leave while a wait is outstanding, which the read loop never used to
+  // allow. The wait has to be settled by the leave: left to its clock it would re-read a session
+  // that is gone, and the deadline callback is nobody's to catch.
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one\n']]),
+  });
+  const session = await joined(engine);
+
+  // A path the room holds no document for, so nothing is ready and the wait really blocks.
+  const waiting = session.waitForChange({ paths: ['b.txt'], timeoutMs: 2_000 });
+  const started = Date.now();
+  await session.leave();
+  const report: WaitReport = await waiting;
+
+  assert.equal(report.ended, true, 'the session it was watching is gone');
+  assert.equal(report.timedOut, false, 'a leave is not the deadline passing');
+  assert.deepEqual(report.changes, []);
+  assert.ok(Date.now() - started < 1_000, 'the leave settled the wait, not its own clock');
+});

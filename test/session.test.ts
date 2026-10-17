@@ -172,6 +172,27 @@ test('a second host or join is refused, naming the live session, and leaving fre
   }
 });
 
+test('two hosts asked for at once open one room, and the second is refused', async () => {
+  // The transport answers each request on its own, so these two really are in flight together:
+  // the one-live-session rule has to hold across the walk and the engine call, not just up to the
+  // first await, or one process ends up holding two rooms.
+  const root = await scratch('busy-at-once');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const factory = new StubFactory(new StubEngine({ role: 'host', invite: INVITE }));
+    const session = new Session({ engines: factory });
+
+    const first = session.host({ root, serverUrl: 'ws://room.example', displayName: 'agent' });
+    const second = session.host({ root, serverUrl: 'ws://room.example', displayName: 'agent' });
+
+    await first;
+    await assert.rejects(second, refused('busy'));
+    assert.equal(factory.hosted.length, 1, 'one room, not two');
+  } finally {
+    await remove(root);
+  }
+});
+
 test('joining hands the engine the whole link and reports the room, the role and the grant', async () => {
   const engine = new StubEngine({
     roomId: 'room-9',
@@ -299,6 +320,30 @@ test('an edit is published as the replica\'s difference, and the hold is given u
     engine.calls.filter((call) => /^(open|close) /.test(call)),
     ['open a.txt', 'close a.txt'],
   );
+});
+
+test('two edits of one path are not interleaved: the second opens after the first has closed', async () => {
+  // Concurrency between a wait and an edit is the point; concurrency between two edits of one
+  // path is not. Both are issued at once, and the second must take its hold only after the first
+  // has published and given its hold up.
+  const engine = new StubEngine({
+    listing: ['a.txt'],
+    documents: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+  });
+  const session = new Session({ engines: new StubFactory(engine) });
+  await session.join({ invite: INVITE, displayName: 'agent' });
+
+  const first = session.edit('a.txt', { start: 0, end: 3, text: 'ONE' });
+  const second = session.edit('a.txt', { start: 4, end: 7, text: 'TWO' });
+  const outcomes = await Promise.all([first, second]);
+
+  assert.deepEqual(
+    engine.calls.filter((call) => /^(open|close) /.test(call)),
+    ['open a.txt', 'close a.txt', 'open a.txt', 'close a.txt'],
+  );
+  assert.equal(engine.text('a.txt'), 'ONE TWO\n');
+  assert.deepEqual(outcomes.map((outcome) => outcome.length), [8, 8]);
 });
 
 test('a write replaces the text through the same local-change path', async () => {
