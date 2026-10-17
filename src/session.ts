@@ -22,8 +22,7 @@
  * purpose, and it is never logged, never written to a file and never put in a diagnostic.
  */
 
-import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import { PeerEngine } from '../vendor/bridge/index.ts';
 import {
@@ -36,7 +35,7 @@ import {
 import type { Engine, TextChange } from '../vendor/bridge/index.ts';
 import { sessionBase } from '../vendor/engine/index.ts';
 import type { EngineEvent, PeerInfo, Role } from '../vendor/engine/index.ts';
-import { enumerateGrant, readGrantedFile } from './grant.ts';
+import { enumerateGrant, readGrantedFile, writeGrantedFile } from './grant.ts';
 import type { GrantCut } from './grant.ts';
 
 /**
@@ -631,12 +630,13 @@ export class Session {
    * would be lying to whoever opens that folder next, and an agent has no unsaved-buffer concept
    * to hold the difference; a guest writes nothing, because the folder is not its own.
    *
-   * The file is read through the same clamp as any other read of the folder: the write happens
-   * only for a path that resolves to a plain file of it, so a symbolic link out of the folder, an
-   * ignored path and a path that is not a file at all are refusals rather than writes. A path the
-   * room has and the folder does not is *not* created — a create has to resolve every directory on
-   * the way with the same hold, which is the write side of the clamp — and that refusal is kept in
-   * `problems` rather than swallowed.
+   * The file is read, and written back, through the same clamp as any other read of the folder,
+   * and the write resolves the path for itself rather than under the name the read answered with:
+   * a symbolic link out of the folder, an ignored path and a path that is not a file at all are
+   * refusals rather than writes, whether the link was there when the read ran or was swapped in
+   * after it. A path the room has and the folder does not is *not* created — a create has to
+   * resolve every directory on the way with the same hold, which is the write side of the clamp —
+   * and that refusal is kept in `problems` rather than swallowed.
    */
   private async applyFromRoom(path: string): Promise<void> {
     const engine = this.engine;
@@ -711,7 +711,7 @@ export class Session {
     }
   }
 
-  /** The host's own write-back, by the same clamped read as an incoming change. */
+  /** The host's own write-back, through the same clamp as an incoming change. */
   private async keepWorkingCopy(path: string, text: string): Promise<EditOutcome['disk']> {
     const root = this.root;
     if (root === undefined) {
@@ -867,19 +867,25 @@ function overBound(text: string): boolean {
 }
 
 /**
- * Writes the room's text into the folder a host shares. It is called only after
- * `readGrantedFile` has resolved the path to a plain file of that folder, so the write goes to a
- * path the clamp has already accepted; the window between that read and this write is the
- * residual `grant.ts` states for its own resolution and is not widened here.
+ * Writes the room's text into the folder a host shares, through the same clamp a read of it goes
+ * through: `writeGrantedFile` resolves every segment inside the descriptor of the directory before
+ * it and opens the leaf `O_NOFOLLOW` through that descriptor, so a name swapped for a symbolic
+ * link is refused where it is opened rather than followed. The read that decides *whether* the
+ * write is needed is a separate resolution of the same path and is never what authorises the
+ * write. What is left over is what `readGrantedFile` leaves: a segment that is a mount point, and
+ * a platform without `/proc/self/fd`, where the steps are checked by name.
  */
 async function writeWorkingCopy(root: string, path: string, text: string): Promise<void> {
-  if (!isGrantedPath(path)) {
-    throw new SessionRefused('not-granted', `${JSON.stringify(path)} is not a path the grant names`);
-  }
   if (overBound(text)) {
     throw new SessionRefused('too-large', `${path} is over the ${MAX_GRANT_FILE_BYTES} bytes a session carries`);
   }
-  await writeFile(join(root, path), text, 'utf8');
+  const written = await writeGrantedFile(root, path, text);
+  if (written.kind === 'refused') {
+    throw new SessionRefused(
+      written.cause,
+      `${JSON.stringify(path)} is not a file this folder will write`,
+    );
+  }
 }
 
 /**

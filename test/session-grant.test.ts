@@ -12,7 +12,7 @@ import { readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { enumerateGrant } from '../src/grant.ts';
+import { enumerateGrant, writeGrantedFile } from '../src/grant.ts';
 import { Session, SessionRefused } from '../src/session.ts';
 import type { SessionRefusal } from '../src/session.ts';
 import { StubEngine, StubFactory } from './helpers/stub-engine.ts';
@@ -251,5 +251,50 @@ test('a host keeps its own folder true to an edit it applied, and a guest writes
     assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'two\n');
   } finally {
     await remove(root);
+  }
+});
+
+test('a write into the shared folder resolves the path itself, so a link swapped in is refused', async () => {
+  const root = await scratch('write-clamp');
+  const outside = await scratch('write-clamp-outside');
+  try {
+    await put(root, 'sub/x.txt', 'inside the folder\n');
+    await put(root, 'leaf.txt', 'inside the folder\n');
+    await put(outside, 'x.txt', 'outside the folder\n');
+    await put(outside, 'elsewhere.txt', 'outside the folder\n');
+
+    // A plain file of the folder when the room's change was read — which is the state the walk
+    // recorded and the read accepts — and a link by the time the write happens. A write that
+    // resolves the name again follows it out of the grant; the clamp refuses it where it opens.
+    await rm(join(root, 'sub'), { recursive: true });
+    await symlink(outside, join(root, 'sub'));
+    await rm(join(root, 'leaf.txt'));
+    await symlink(join(outside, 'elsewhere.txt'), join(root, 'leaf.txt'));
+
+    assert.deepEqual(await writeGrantedFile(root, 'sub/x.txt', 'from the room\n'), {
+      kind: 'refused',
+      cause: 'not-a-file',
+    });
+    assert.deepEqual(await writeGrantedFile(root, 'leaf.txt', 'from the room\n'), {
+      kind: 'refused',
+      cause: 'not-a-file',
+    });
+    assert.equal(await readFile(join(outside, 'x.txt'), 'utf8'), 'outside the folder\n');
+    assert.equal(await readFile(join(outside, 'elsewhere.txt'), 'utf8'), 'outside the folder\n');
+
+    // And a path the folder holds is written through the same clamp, whole.
+    await put(root, 'kept.txt', 'one\n');
+    assert.deepEqual(await writeGrantedFile(root, 'kept.txt', 'two\n'), { kind: 'written' });
+    assert.equal(await readFile(join(root, 'kept.txt'), 'utf8'), 'two\n');
+
+    // A path the folder does not hold is refused rather than created.
+    assert.deepEqual(await writeGrantedFile(root, 'new.txt', 'from the room\n'), {
+      kind: 'refused',
+      cause: 'missing',
+    });
+    assert.equal(existsSync(join(root, 'new.txt')), false);
+  } finally {
+    await remove(root);
+    await remove(outside);
   }
 });
