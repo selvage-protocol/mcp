@@ -313,6 +313,9 @@ const STEP = FOLDER | NO_FOLLOW;
 /** A leaf: the file itself, and never a link to one. */
 const LEAF = constants.O_RDONLY | NO_FOLLOW;
 
+/** The same leaf, opened to be replaced whole: `O_TRUNC` empties it through the descriptor. */
+const LEAF_WRITE = constants.O_WRONLY | constants.O_TRUNC | NO_FOLLOW;
+
 /**
  * Whether a step can be taken relative to the directory the step before it found. Linux publishes
  * a process's open descriptors under `/proc/self/fd`, and a name under one of those is looked up
@@ -412,6 +415,113 @@ function refused(cause: GrantRefusal): Refused {
   return { kind: 'refused', cause };
 }
 
+/**
+ * What a write of a granted path did, in the shape a read refuses in: a refusal is the grant's
+ * ruling on the path, and it is reported rather than thrown so a caller can keep the room's own
+ * answer apart from this host's reason for not writing.
+ */
+export type GrantedWrite = { readonly kind: 'written' } | Refused;
+
+/**
+ * A room path written back into the folder a host shares, or the grant's refusal to write it.
+ *
+ * This is the write side of the same clamp `readGrantedFile` reads through, and it resolves the
+ * path the same way: every step is taken inside the descriptor of the directory the step before it
+ * found, the leaf has to be an entry of that directory spelled exactly as it lists it
+ * (`holdsName`), and it is opened `O_WRONLY | O_TRUNC | O_NOFOLLOW` *through that descriptor*
+ * rather than by a name a caller assembled. A segment swapped for a symbolic link between the read
+ * that accepted the path and this write is therefore refused where it is opened, and a leaf that
+ * became a link is refused by the open itself; `writeFile(join(root, path))`, which re-resolves
+ * every segment by name, would follow either of them out of the grant.
+ *
+ * What is not created is the point as much as what is: the path has to be a plain file the folder
+ * already holds, so a path the room has and the folder does not is a refusal rather than a new
+ * file, and the folder's own ignore files bind the write the way they bind the listing.
+ *
+ * The residuals are the read's, and they are the read's because this is the same resolution: a
+ * segment that is a *mount point* rather than a link, and a platform without `/proc/self/fd`,
+ * where each step is checked by name (`walkGoverning`). Neither is widened here.
+ */
+export async function writeGrantedFile(
+  root: string,
+  path: string,
+  text: string,
+): Promise<GrantedWrite> {
+  if (!isGrantedPath(path)) {
+    return refused('not-granted');
+  }
+  const segments = path.split('/');
+  const leaf = segments.pop();
+  if (leaf === undefined) {
+    return refused('not-granted');
+  }
+  if (!PINNED_STEPS) {
+    const directory = await walkGoverning(root, segments);
+    if ('kind' in directory) {
+      return directory;
+    }
+    if (!holdsName(directory.entries, leaf)) {
+      return refused('missing');
+    }
+    return await writeLeaf(join(directory.path, leaf), directory.sources, path, text);
+  }
+  const directory = await openGoverning(root, segments);
+  if ('kind' in directory) {
+    return directory;
+  }
+  try {
+    if (!holdsName(directory.entries, leaf)) {
+      return refused('missing');
+    }
+    return await writeLeaf(inside(directory.handle, leaf), directory.sources, path, text);
+  } finally {
+    await directory.handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * One granted file's whole text replaced through the descriptor it is opened at, or why this host
+ * will not write it.
+ *
+ * The leaf is opened with `O_NOFOLLOW` where the platform has it, and the type and the size come
+ * from the descriptor that open returned rather than from an `lstat` of the same name a rename can
+ * get behind. The open cannot create anything: a name the folder does not hold is `missing`.
+ */
+async function writeLeaf(
+  name: string,
+  ignores: readonly IgnoreSource[],
+  path: string,
+  text: string,
+): Promise<GrantedWrite> {
+  if (isIgnoredPath(ignores, path, false)) {
+    return refused('not-granted');
+  }
+  if (Buffer.byteLength(text, 'utf8') > MAX_GRANT_FILE_BYTES) {
+    return refused('too-large');
+  }
+  const handle = await open(name, LEAF_WRITE).catch((error: unknown) =>
+    refused(stepRefusal(error)),
+  );
+  if ('kind' in handle) {
+    return handle;
+  }
+  try {
+    const opened = await handle.stat().catch(() => undefined);
+    if (opened === undefined) {
+      return refused('missing');
+    }
+    if (!opened.isFile()) {
+      return refused('not-a-file');
+    }
+    if (opened.size > MAX_GRANT_FILE_BYTES) {
+      return refused('too-large');
+    }
+    await handle.writeFile(text, 'utf8');
+    return { kind: 'written' };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 /**
  * An open directory of the shared folder, with the ignore sources that govern a path under it.
  *
