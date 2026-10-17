@@ -51,7 +51,9 @@ function roomIdOf(hosted: string): string {
 }
 
 function inviteOf(hosted: string): string {
-  const match = /^invite: (\S+)$/m.exec(hosted);
+  // The invite line carries a sentence after the URL, so the URL is read off the line and not
+  // off the whole of it: an anchored match found nothing and refused a setup that had worked.
+  const match = /^invite: (\S+)/m.exec(hosted);
   assert.ok(match !== null, `session_host answered no invite URL: ${hosted}`);
   return match[1] as string;
 }
