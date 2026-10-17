@@ -14,9 +14,10 @@
  * - **A host applies the room's changes to its working copy.** A host whose disk silently
  *   diverged from the room would be lying to whoever opens that folder next, and an agent has no
  *   unsaved-buffer concept to hold the difference. See `applyFromRoom`.
- * - **Identity, not a cursor.** The display name is what a human sees who joined; no selection is
- *   ever published, because inventing one would put a cursor in someone's editor that no agent
- *   is looking through (`engine.md` §6).
+ * - **Identity, and a cursor only when asked.** The display name is what a human sees who joined.
+ *   A selection is published only for a session opened with `publishCursor`, because a caret in
+ *   someone's editor claims the agent is looking at a place in a file, and a caller that never
+ *   asked for that should not have one invented for it (`engine.md` §6).
  *
  * The invite's fragment is a credential: it is handed back to a host because that is its whole
  * purpose, and it is never logged, never written to a file and never put in a diagnostic.
@@ -143,8 +144,8 @@ export type Mode = 'host' | 'guest';
 
 /**
  * One seat as this replica sees it: the room's own record of a peer, plus whether it published
- * awareness. `aware` says the peer has a cursor somewhere, not where — this adapter never
- * publishes one of its own and has no business rendering another's.
+ * awareness. `aware` says the peer has a cursor somewhere, not where — this adapter publishes
+ * one only for a session that asked for it and has no business rendering another's.
  */
 export interface Participant {
   readonly peerId: string;
@@ -213,12 +214,20 @@ export interface HostOptions {
   /** The server's address, as a person spells it: `ws://`, `wss://`, `http://` or `https://`. */
   readonly serverUrl: string;
   readonly displayName: string;
+  /**
+   * Whether this seat publishes a cursor for the path each read, edit and write touches. Off
+   * unless it is asked for: a caret in another seat's editor is a claim about where this agent
+   * is, and a caller that did not ask for one should not have it invented.
+   */
+  readonly publishCursor?: boolean;
 }
 
 export interface JoinOptions {
   /** The whole link, fragment and all. Without the fragment there is nothing to read a room with. */
   readonly invite: string;
   readonly displayName: string;
+  /** See {@link HostOptions.publishCursor}. */
+  readonly publishCursor?: boolean;
 }
 
 /** What a read of a granted path found in the room's text. */
@@ -253,6 +262,11 @@ export interface SessionOptions {
   readonly grantWaitMs?: number;
   /** How many problems `status` keeps. */
   readonly problemLimit?: number;
+  /**
+   * How often a published cursor is renewed. Defaults to the room's own `awareness_renew_ms`
+   * (`§8.2`), which is the window an awareness state is renewed on and expires after.
+   */
+  readonly cursorRenewMs?: number;
 }
 
 /** The host's own listing, as the engine reads it when it seals a state (`§7.1`). */
@@ -280,6 +294,8 @@ export class Session {
   private readonly documentWaitMs: number;
   private readonly grantWaitMs: number;
   private readonly problemLimit: number;
+  /** How often a published cursor is renewed; the room's own window when the caller names none. */
+  private readonly cursorRenewMs: number | undefined;
   private readonly listing = new Listing();
   private readonly problems: SessionProblem[] = [];
   /** The seed in flight per path, so a second ask for one joins it rather than reading again. */
@@ -293,12 +309,18 @@ export class Session {
   private root: string | undefined;
   private cut: GrantCut | undefined;
   private live = false;
+  /** Whether the live session was opened with `publishCursor`. */
+  private cursorEnabled = false;
+  /** The last position published, kept so the renewal can repeat it. */
+  private cursor: { readonly path: string; readonly at: number } | undefined;
+  private cursorTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: SessionOptions = {}) {
     this.engines = options.engines ?? realEngines;
     this.documentWaitMs = options.documentWaitMs ?? 5_000;
     this.grantWaitMs = options.grantWaitMs ?? 250;
     this.problemLimit = options.problemLimit ?? 20;
+    this.cursorRenewMs = options.cursorRenewMs;
   }
 
   /** Whether a session is live, which is what `host` and `join` refuse over. */
@@ -344,7 +366,7 @@ export class Session {
         masked(address, sentence(error), '[address]'),
       );
     }
-    this.adopt(engine, 'host', root, walked.cut);
+    this.adopt(engine, 'host', root, walked.cut, options.publishCursor === true);
     const invite = engine.inviteUrl();
     if (invite === undefined) {
       await this.leave();
@@ -374,7 +396,7 @@ export class Session {
     } catch (error: unknown) {
       throw new SessionRefused('join-failed', masked(invite, sentence(error)));
     }
-    this.adopt(engine, 'guest', undefined, undefined);
+    this.adopt(engine, 'guest', undefined, undefined, options.publishCursor === true);
     await this.settleGrant();
     const info = engine.session();
     const paths = this.grantedPaths();
@@ -412,6 +434,9 @@ export class Session {
   async leave(): Promise<void> {
     const engine = this.requireLive('leaving');
     const mode = this.mode;
+    this.stopCursorRenewal();
+    const published = this.cursor !== undefined;
+    this.cursor = undefined;
     this.engine = undefined;
     this.mode = undefined;
     this.root = undefined;
@@ -421,6 +446,11 @@ export class Session {
     this.seeding.clear();
     this.writing.clear();
     try {
+      if (published) {
+        // The caret does not outlive the session: a state left behind would show a seat that is
+        // gone, at a position nothing is renewing.
+        engine.setAwareness(null);
+      }
       if (mode === 'host') {
         await engine.closeRoom();
       }
@@ -480,12 +510,16 @@ export class Session {
     const engine = this.requireLive('reading a granted path');
     this.assertShared(path);
     await engine.open(path);
+    let text: string;
     try {
       await this.awaitDocument(path);
-      return { path, text: engine.text(path) };
+      text = engine.text(path);
     } finally {
       await engine.close(path);
     }
+    // A read has one place it can honestly name: the start of the file.
+    this.showCursor(path, 0);
+    return { path, text };
   }
 
   /** Replaces a granted file's whole text in the room. */
@@ -531,6 +565,7 @@ export class Session {
     }
     await engine.open(path);
     let wanted: string;
+    let caret: number | undefined;
     try {
       await this.awaitDocument(path);
       const replica = engine.text(path);
@@ -545,13 +580,21 @@ export class Session {
       if (delta.text !== '') {
         engine.insert(path, delta.start, delta.text);
       }
+      if (delta.start !== delta.end || delta.text !== '') {
+        // The end of the range the change replaced is where the edit happened; an empty change
+        // names no place, so it publishes nothing.
+        caret = delta.start + delta.text.length;
+      }
     } finally {
       await engine.close(path);
+    }
+    if (caret !== undefined) {
+      this.showCursor(path, caret);
     }
     return { path, length: wanted.length, disk: await this.keepWorkingCopy(path, wanted) };
   }
 
-  /** Renames this seat, which is the whole of the presence an agent publishes. */
+  /** Renames this seat. The name is the whole of the identity an agent publishes. */
   async rename(displayName: string): Promise<void> {
     await this.requireLive('renaming this seat').rename(displayName);
   }
@@ -581,6 +624,7 @@ export class Session {
     mode: Mode,
     root: string | undefined,
     cut: GrantCut | undefined,
+    publishCursor: boolean,
   ): void {
     this.engine = engine;
     this.mode = mode;
@@ -590,9 +634,71 @@ export class Session {
     this.problems.length = 0;
     this.seeding.clear();
     this.writing.clear();
+    this.stopCursorRenewal();
+    this.cursorEnabled = publishCursor;
+    this.cursor = undefined;
     engine.on((event) => {
       this.noteEvent(event);
     });
+  }
+
+  /**
+   * Publishes this seat's cursor for `path`: a caret `at` code units into the room's text, with
+   * the path beside it. Nothing happens unless the caller opted in.
+   *
+   * The state carries a path and a selection and no identity: a peer is attributed its cursor by
+   * joining the awareness client id to the seat's own record (`§8.4`), which the session layer
+   * publishes. The engine turns the offsets into relative positions, so what reaches the room is
+   * anchored to the CRDT and survives edits (`§8.1`).
+   */
+  private showCursor(path: string, at: number): void {
+    if (!this.cursorEnabled) {
+      return;
+    }
+    const engine = this.engine;
+    if (engine === undefined) {
+      return;
+    }
+    this.cursor = { path, at };
+    engine.setSelection(path, { anchor: at, head: at });
+    this.armCursorRenewal();
+  }
+
+  /**
+   * Re-publishes the cursor on the room's renewal clock. An awareness state lapses at
+   * `awareness_expire_ms` unless it is renewed, so a caret published once and then left alone
+   * vanishes from every other seat; the interval is cleared when the session ends.
+   */
+  private armCursorRenewal(): void {
+    if (this.cursorTimer !== undefined) {
+      return;
+    }
+    const timer = setInterval(() => {
+      const engine = this.engine;
+      const cursor = this.cursor;
+      if (engine !== undefined && cursor !== undefined) {
+        engine.setSelection(cursor.path, { anchor: cursor.at, head: cursor.at });
+      }
+    }, this.renewalMs());
+    // Like every timer the engine starts: a session that is left holds no process open.
+    timer.unref();
+    this.cursorTimer = timer;
+  }
+
+  private stopCursorRenewal(): void {
+    if (this.cursorTimer !== undefined) {
+      clearInterval(this.cursorTimer);
+      this.cursorTimer = undefined;
+    }
+  }
+
+  /** The renewal window: the caller's number, or the room's own advertised one. */
+  private renewalMs(): number {
+    if (this.cursorRenewMs !== undefined) {
+      return this.cursorRenewMs;
+    }
+    const room = this.engine?.session().keepalive.awareness_renew_ms;
+    return typeof room === 'number' && room > 0 ? room : DEFAULT_CURSOR_RENEW_MS;
   }
 
   private requireLive(what: string): SessionEngine {
@@ -986,6 +1092,9 @@ const POLL_MS = 20;
  * on the same millisecond the room's own answer was sent in.
  */
 const SEAT_MARGIN_MS = 1_000;
+
+/** How often a published cursor is renewed when neither the caller nor the room names a window. */
+const DEFAULT_CURSOR_RENEW_MS = 15_000;
 
 /**
  * What to do with a path this session is asked to publish into the room: the grant's own name
