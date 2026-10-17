@@ -26,6 +26,7 @@
     "yjs": "13.6.33"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@types/node": "^26.6.4",
     "@types/ws": "8.18.2",
     "typescript": "7.0.2"
