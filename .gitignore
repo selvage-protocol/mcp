@@ -1,0 +1,8 @@
+node_modules/
+.tmp/
+.tmp-*/
+.pre-commit-config.yaml
+
+# Sibling checkouts for parallel work on this repository.
+.worktrees/
+.notes/
