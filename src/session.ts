@@ -866,9 +866,16 @@ function sentence(error: unknown): string {
 }
 
 /**
- * A failure read back without the invite in it. The fragment is a credential, and a refusal that
- * quotes the link is a refusal that can be logged, shown or written to a file with the key in it.
+ * A failure read back without `secret` in it, when there is one to take out. An invite's fragment
+ * is a room key, and a refusal that quotes the link is a refusal that can be logged, shown or
+ * written to a file with the key in it; it is used for an address a caller handed to a host for
+ * the same reason, because an invite handed where an address belongs is such a link.
+ *
+ * An empty secret is nothing to take out, and splitting on it would put `[invite]` between every
+ * two characters of the message instead of masking anything: an invite that trims to nothing is
+ * what a caller reaches with an empty or whitespace `invite`.
  */
-function masked(invite: string, error: unknown): string {
-  return sentence(error).split(invite).join('[invite]');
+function masked(secret: string, error: unknown): string {
+  const text = sentence(error);
+  return secret === '' ? text : text.split(secret).join('[invite]');
 }
