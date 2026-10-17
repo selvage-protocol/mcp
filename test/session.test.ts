@@ -247,6 +247,28 @@ test('participants carry the room\'s names and roles, and awareness only where i
   assert.deepEqual(engine.calls.filter((call) => call.startsWith('setAwareness')), []);
 });
 
+test('a listing that never arrived is recorded, not answered as an empty room', async () => {
+  // A guest that opened with no documents and no listing: through this interface an empty folder
+  // and a listing still on its way are the same absent number, and the wait is what tells them
+  // apart. The wait ending is a fact about the join, so it is kept rather than dropped.
+  const engine = new StubEngine({ role: 'guest' });
+  const session = new Session({ engines: new StubFactory(engine), grantWaitMs: 20 });
+
+  const joined = await session.join({ invite: INVITE, displayName: 'agent' });
+  assert.deepEqual(joined.paths, []);
+  assert.equal(joined.pathCount, 0);
+
+  const problems = session.status().problems;
+  assert.equal(problems.length, 1, JSON.stringify(problems));
+  assert.equal(problems[0]?.cause, 'timed-out');
+  assert.match(problems[0]?.message ?? '', /20 ms/);
+  // And a listing that did arrive is not recorded: an empty folder is not a problem.
+  engine.listing = ['a.txt'];
+  const listed = new Session({ engines: new StubFactory(new StubEngine({ listing: ['a.txt'] })) });
+  await listed.join({ invite: INVITE, displayName: 'agent' });
+  assert.deepEqual(listed.status().problems, []);
+});
+
 test('an edit is published as the replica\'s difference, and the hold is given up', async () => {
   const engine = new StubEngine({
     listing: ['a.txt'],

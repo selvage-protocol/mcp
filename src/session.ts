@@ -794,9 +794,12 @@ export class Session {
   /**
    * Waits, briefly, for a listing a join has not been told yet: §7.1's state carries it, and a
    * seat that opened with no documents waits for it the way the companion does (`engine.md` §4).
-   * An empty folder and a listing that has not arrived are the same two absent numbers through
-   * this interface, so the wait is what tells them apart — and it ends either way, which is why
-   * joining an empty room answers with an empty listing rather than a refusal.
+   *
+   * The wait ending either way is why joining an empty room answers with an empty listing rather
+   * than a refusal, and it is also why the wait's own answer is not thrown away: through this
+   * interface an empty folder and a listing still on its way are the same absent number, so a
+   * listing that never arrived is recorded with the wait that expired. `status` then says which
+   * of the two this was instead of reporting both as an empty room.
    */
   private async settleGrant(): Promise<void> {
     const engine = this.requireLive('settling the grant');
@@ -804,7 +807,17 @@ export class Session {
     if (info.role === 'host' || info.documents.length > 0 || engine.grantedPaths().length > 0) {
       return;
     }
-    await this.until(() => (this.engine?.grantedPaths().length ?? 0) > 0, this.grantWaitMs);
+    const arrived = await this.until(
+      () => (this.engine?.grantedPaths().length ?? 0) > 0,
+      this.grantWaitMs,
+    );
+    if (!arrived) {
+      this.note(
+        undefined,
+        'timed-out',
+        `no listing arrived within ${this.grantWaitMs} ms, which an empty folder and one still on its way both look like here: this replica holds ${engine.grantedPaths().length} granted path(s)`,
+      );
+    }
   }
 
   /** Keeps a refusal nobody asked for, so that `status` can report a host that has fallen behind. */
