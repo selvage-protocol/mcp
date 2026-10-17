@@ -1,0 +1,260 @@
+/**
+ * The session envelope: the JSON shapes, the name vocabulary and the refusal codes of
+ * `PROTOCOL.md` §4–§6 and §11
+ * (https://github.com/selvage-protocol/specification).
+ *
+ * Unknown fields and unknown event names are ignored, so every shape here is
+ * deliberately permissive: a peer that adds a field must never break this client.
+ */
+
+/** The wire version every session envelope carries. */
+export const WIRE_VERSION = 'selvage/2';
+
+/** WebSocket endpoint path. */
+export const ENDPOINT_PATH = '/session';
+
+/** Negotiation endpoint path, served over plain HTTP on the same listener. */
+export const META_PATH = '/meta';
+
+/** Capabilities this client believes it has. The server ignores ones it does not know. */
+export const CLIENT_CAPABILITIES: readonly string[] = ['y-protocols/1', 'awareness'];
+
+/** Server → client event names (§6). */
+export const event = {
+  roomCreated: 'room.created',
+  roomJoined: 'room.joined',
+  peerJoined: 'peer.joined',
+  peerLeft: 'peer.left',
+  peerRenamed: 'peer.renamed',
+  roomGone: 'room.gone',
+  sessionError: 'session.error',
+} as const;
+
+/** Machine-readable codes for `error.code` (§11). */
+export const code = {
+  unknownMethod: 'unknown_method',
+  badMessage: 'bad_message',
+  badParams: 'bad_params',
+  helloRequired: 'hello_required',
+  roomUnknown: 'room_unknown',
+  tokenInvalid: 'token_invalid',
+  roomGone: 'room_gone',
+  alreadySeated: 'already_seated',
+} as const;
+
+/** WebSocket close codes, in the private-use range (§11). */
+export const close = {
+  protocolError: 4000,
+  roomUnknown: 4001,
+  tokenInvalid: 4002,
+  roomGone: 4003,
+} as const;
+
+/**
+ * The bare code a `1013` close is read as. `1013` is IANA's "try again later" and not §11
+ * vocabulary — §11 leaves a capacity fault to IANA — so this is a name of this client's own,
+ * and it is deliberately not one a retry gives up on: a full server is worth dialling again.
+ */
+export const TRY_AGAIN_LATER = 'try_again_later';
+
+/**
+ * The code a WebSocket close number carries, so a close is read by number and not by the
+ * server's wording. `1013` is the capacity fault this client retries; §11's three refusals
+ * keep the names §11 also gives their codes, and 4000 is the protocol's own close; every other
+ * number — including one §11 does not register, which a client **MUST NOT** read session
+ * meaning into — is `closed`, which retries like any other drop of the socket.
+ */
+export function closeCode(codeNumber: number): string {
+  switch (codeNumber) {
+    case 1013:
+      return TRY_AGAIN_LATER;
+    case close.protocolError:
+      return 'protocol_error';
+    case close.roomUnknown:
+      return code.roomUnknown;
+    case close.tokenInvalid:
+      return code.tokenInvalid;
+    case close.roomGone:
+      return code.roomGone;
+    default:
+      return 'closed';
+  }
+}
+
+/**
+ * The reserved namespace for a code an implementation defines for itself (§10.1, §11). A
+ * handshake refused with one of these is as final as the bare codes below: §9.1 says it MUST
+ * NOT be re-helloed automatically, whatever it means.
+ */
+const RESERVED_CODE_PREFIX = 'x.';
+
+/** Refusals after which retrying the same URL cannot help (§9.1, §11). */
+export const TERMINAL_CODES: readonly string[] = [
+  code.roomUnknown,
+  code.tokenInvalid,
+  code.roomGone,
+];
+
+/**
+ * A participant's role: `host` minted the room and signs its states, `guest` edits, and `viewer`
+ * edits its own screen and publishes none of it (§13.4, §13.9).
+ */
+export type Role = 'host' | 'guest' | 'viewer';
+
+/**
+ * The protocol's bound on a display name: at most this many UTF-16 code units (§5). A name
+ * over it is refused, never truncated: the server refuses the `session.hello` one would
+ * arrive in, and receipt enforces the same bound, so a name past it never reaches the room.
+ * Counting is `String.prototype.length`, which *is* UTF-16 code units — an astral character
+ * costs two, where a code-point count would charge one.
+ */
+export const MAX_DISPLAY_NAME_UNITS = 32;
+
+/** A participant as seen by the session layer. `awareness_client_id` is how a cursor is attributed. */
+export interface PeerInfo {
+  peer_id: string;
+  display_name: string;
+  role: Role;
+  awareness_client_id?: number;
+}
+
+/** The session's awareness clock, advertised by the server (§8.2). */
+export interface Keepalive {
+  ping_interval_ms: number;
+  awareness_renew_ms: number;
+  awareness_expire_ms: number;
+}
+
+/**
+ * The `keepalive` object of `GET /meta` (§2): the session's clocks, plus the room's grace
+ * period, which the handshake reply has no place for. A host that has been detached is the
+ * one connection that needs the grace and the one that is no longer there to be told, so it
+ * is advertised before a session exists.
+ */
+export interface MetaKeepalive extends Keepalive {
+  /** How long a room survives its host's connection ending (§9, §9.1). */
+  room_grace_ms?: number;
+}
+
+export interface ErrorObject {
+  code: string;
+  message: string;
+}
+
+/** A server → client response or event (§4.2, §4.3). */
+export interface ServerMessage {
+  v?: string;
+  id?: number;
+  event?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: ErrorObject;
+}
+
+/** `GET /meta` response body (§2). */
+export interface Meta {
+  server?: string;
+  wire_versions?: string[];
+  capabilities?: string[];
+  keepalive?: Partial<MetaKeepalive>;
+  roles?: string[];
+}
+
+/** The keepalive a client runs on before the server has spoken. */
+export const DEFAULT_KEEPALIVE: Keepalive = {
+  ping_interval_ms: 30_000,
+  awareness_renew_ms: 15_000,
+  awareness_expire_ms: 30_000,
+};
+
+/**
+ * What a client adds to one renewal window when it waits for the room's answer.
+ *
+ * The window is not this number and is not assumed: §7.1 lets a host fold the answer to an
+ * announcement it has already answered inside a window and publish it at that window's end, and
+ * a peer whose key no state commits yet can publish nothing at all — its holds included, and a
+ * hold is how an ask is made — so an ask can wait a whole `awareness_renew_ms`, read from the
+ * session (`Keepalive`), before the peer that owes the answer even hears it. Past the window,
+ * what is left to allow for is the host's own read of its working copy, the content frame and
+ * its application here.
+ *
+ * The number is a **chosen** allowance, not a measurement: nothing bounds those three, and a
+ * client that needs a bounded wait has to pick one. A client waits
+ * `awareness_renew_ms + ANSWER_SETTLE_MS`.
+ */
+export const ANSWER_SETTLE_MS = 5_000;
+
+/**
+ * True when a refusal or close code means the session cannot be resumed. Every code in the
+ * reserved `x.` namespace is terminal, known or not, exactly as the Rust reference client
+ * treats it: the namespace exists so an implementation can refuse without teaching every
+ * client its word first, and §9.1 forbids re-helloeing any such refusal.
+ */
+export function isTerminalCode(codeName: string | undefined): boolean {
+  return (
+    codeName !== undefined &&
+    (codeName.startsWith(RESERVED_CODE_PREFIX) || TERMINAL_CODES.includes(codeName))
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Reads a string field, tolerating a missing or mistyped one. */
+export function textField(
+  value: unknown,
+  key: string,
+): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const field = value[key];
+  return typeof field === 'string' ? field : undefined;
+}
+
+/** Reads a numeric field, tolerating a missing or mistyped one. */
+export function numberField(
+  value: unknown,
+  key: string,
+): number | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const field = value[key];
+  return typeof field === 'number' && Number.isFinite(field)
+    ? field
+    : undefined;
+}
+
+/**
+ * Parses a text frame into a server message, or `undefined` when the frame is not a
+ * JSON object. A peer that sends something else is told nothing and the session goes on:
+ * an envelope this client cannot read is not a reason to drop a working connection.
+ */
+export function parseServerMessage(text: string): ServerMessage | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const id = numberField(value, 'id');
+  const error = value.error;
+  return {
+    v: textField(value, 'v'),
+    id: id === undefined ? undefined : Math.trunc(id),
+    event: textField(value, 'event'),
+    params: value.params,
+    result: value.result,
+    error: isRecord(error)
+      ? {
+          code: textField(error, 'code') ?? 'error',
+          message: textField(error, 'message') ?? 'the server reported a fault',
+        }
+      : undefined,
+  };
+}
