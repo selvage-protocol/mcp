@@ -141,11 +141,16 @@ test('two MCP servers converge on one room through a real selvaged', { timeout: 
     STEP_MS,
   );
   assert.equal(seen, after);
-  assert.equal(
-    await readFile(join(hostFolder, 'a.txt'), 'utf8'),
-    after,
-    "the host's own folder did not follow the room",
+  // The folder's own copy is a second, later thing: the room's event starts the write-back and
+  // nothing waits for it, so this waits for the folder rather than reading it once — and the
+  // wait still fails if the folder never follows, naming what was on disk when it gave up.
+  const onDisk = await until(
+    "the host's own folder to follow the room",
+    () => readFile(join(hostFolder, 'a.txt'), 'utf8'),
+    (text) => text === after,
+    STEP_MS,
   );
+  assert.equal(onDisk, after);
 
   // Host -> guest: a write reaches a file the guest has no copy of.
   const published = 'the host published this\n';
