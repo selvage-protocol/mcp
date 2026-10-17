@@ -725,6 +725,10 @@ export class Session {
    * insert the whole file, doubling the room's text; a second ask joins the seed already in
    * flight instead. The insertion lands in the replica before the call returns, so a completed
    * seed needs no memory of its own — the next ask is answered by `engine.has`.
+   *
+   * The map is not the whole of that check-then-act: the room can deliver the document into this
+   * replica *while* the seed's own folder read is in flight, which no second ask is needed for.
+   * `readAndSeed` takes the same look again once the read is over.
    */
   private async seedDocument(path: string): Promise<void> {
     const engine = this.requireLive('seeding a document');
@@ -748,11 +752,23 @@ export class Session {
     }
   }
 
-  /** The folder read and the one insertion a seed is, shared by every ask that joined it. */
+  /**
+   * The folder read and the one insertion a seed is, shared by every ask that joined it. The
+   * replica is asked a second time between the two: what the read took may have been overtaken by
+   * the room, and the room's text is the one that stays.
+   */
   private async readAndSeed(engine: SessionEngine, root: string, path: string): Promise<void> {
     const read = await readGrantedFile(root, path);
     if (read.kind === 'refused') {
       throw new SessionRefused(read.cause, `${path} is in the room's open set and the grant will not read it`);
+    }
+    // The room can deliver the document while this folder is being read: the hold that asked for
+    // the seed and the arrival are two things, and only the guard above saw the replica before the
+    // read. A working copy is the truth for a path nothing has arrived for, and not for one that
+    // has — so what arrived stays, and the file's text does not go in on top of it. Without this
+    // the room holds the file's text twice, which is what an edit then refuses as ambiguous.
+    if (engine.has(path)) {
+      return;
     }
     engine.insert(path, 0, toCrdt(read.text));
   }
