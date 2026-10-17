@@ -273,6 +273,8 @@ export class Session {
   private readonly problems: SessionProblem[] = [];
   /** The seed in flight per path, so a second ask for one joins it rather than reading again. */
   private readonly seeding = new Map<string, Promise<void>>();
+  /** The write-back in flight per path, so two room changes for one path never write at once. */
+  private readonly writing = new Map<string, Promise<void>>();
 
   private engine: SessionEngine | undefined;
   private mode: Mode | undefined;
@@ -406,6 +408,7 @@ export class Session {
     this.live = false;
     this.problems.length = 0;
     this.seeding.clear();
+    this.writing.clear();
     try {
       if (mode === 'host') {
         await engine.closeRoom();
@@ -575,6 +578,7 @@ export class Session {
     this.live = true;
     this.problems.length = 0;
     this.seeding.clear();
+    this.writing.clear();
     engine.on((event) => {
       this.noteEvent(event);
     });
@@ -641,27 +645,61 @@ export class Session {
    * after it. A path the room has and the folder does not is *not* created — a create has to
    * resolve every directory on the way with the same hold, which is the write side of the clamp —
    * and that refusal is kept in `problems` rather than swallowed.
+   *
+   * The change waits for the write-back already in flight for the same path: two of them overlap
+   * on a file each empties before it writes, which can leave one version's head under another's
+   * tail, and the room's text is read here, when the wait is over, so the last change is the one
+   * that lands.
    */
   private async applyFromRoom(path: string): Promise<void> {
-    const engine = this.engine;
-    const root = this.root;
-    if (engine === undefined || root === undefined) {
-      return;
-    }
-    try {
-      const current = await readGrantedFile(root, path);
-      if (current.kind === 'refused') {
-        this.note(path, current.cause, `the room changed ${path}, which this folder will not resolve`);
+    await this.serialized(path, async () => {
+      const engine = this.engine;
+      const root = this.root;
+      if (engine === undefined || root === undefined) {
         return;
       }
-      const text = engine.text(path);
-      if (current.text === text) {
-        return;
+      try {
+        const current = await readGrantedFile(root, path);
+        if (current.kind === 'refused') {
+          this.note(path, current.cause, `the room changed ${path}, which this folder will not resolve`);
+          return;
+        }
+        const text = engine.text(path);
+        if (current.text === text) {
+          return;
+        }
+        await writeWorkingCopy(root, path, text);
+      } catch (error: unknown) {
+        this.note(path, 'write-failed', `the room changed ${path} and writing it failed: ${sentence(error)}`);
       }
-      await writeWorkingCopy(root, path, text);
-    } catch (error: unknown) {
-      this.note(path, 'write-failed', `the room changed ${path} and writing it failed: ${sentence(error)}`);
-    }
+    });
+  }
+
+  /**
+   * One write-back of a path at a time, which is what `applyFromRoom` and `keepWorkingCopy` are
+   * made of. A change arrives while the one before it is still reading the folder or still
+   * writing, and both would open the same leaf and empty it before writing to it — the file can
+   * end up holding one version's head and another's tail, and an older text can be the one that
+   * lands last, which leaves the host's folder diverged with no further event coming to fix it.
+   *
+   * A second ask joins the one in flight rather than starting beside it. The entry is dropped only
+   * while it is still the one the map holds, so a chain that outlives a session neither answers
+   * the next session's ask for the same path nor clobbers its entry.
+   */
+  private serialized<T>(path: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.writing.get(path) ?? Promise.resolve();
+    const next = previous.then(work, work);
+    const settled: Promise<void> = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.writing.set(path, settled);
+    void settled.then(() => {
+      if (this.writing.get(path) === settled) {
+        this.writing.delete(path);
+      }
+    });
+    return next;
   }
 
   /** A host seeds the paths the room is holding and it has no document for (`§13.7`, §5). */
@@ -742,27 +780,36 @@ export class Session {
     }
   }
 
-  /** The host's own write-back, through the same clamp as an incoming change. */
+  /**
+   * The host's own write-back, through the same clamp as an incoming change, and through the same
+   * one-at-a-time rule: an incoming change for the path can be waiting in the chain when the edit
+   * returns, and the folder follows the room, so what is written is the replica's text as this
+   * turn finds it rather than the text the edit handed over.
+   */
   private async keepWorkingCopy(path: string, text: string): Promise<EditOutcome['disk']> {
     const root = this.root;
     if (root === undefined) {
       return 'none';
     }
-    try {
-      const current = await readGrantedFile(root, path);
-      if (current.kind === 'refused') {
-        this.note(path, current.cause, `${path} holds the edit in the room and this folder would not resolve it`);
+    return this.serialized(path, async () => {
+      const engine = this.engine;
+      const wanted = engine !== undefined && engine.has(path) ? engine.text(path) : text;
+      try {
+        const current = await readGrantedFile(root, path);
+        if (current.kind === 'refused') {
+          this.note(path, current.cause, `${path} holds the edit in the room and this folder would not resolve it`);
+          return 'refused';
+        }
+        if (current.text === wanted) {
+          return 'unchanged';
+        }
+        await writeWorkingCopy(root, path, wanted);
+        return 'written';
+      } catch (error: unknown) {
+        this.note(path, 'write-failed', `${path} holds the edit in the room and writing it failed: ${sentence(error)}`);
         return 'refused';
       }
-      if (current.text === text) {
-        return 'unchanged';
-      }
-      await writeWorkingCopy(root, path, text);
-      return 'written';
-    } catch (error: unknown) {
-      this.note(path, 'write-failed', `${path} holds the edit in the room and writing it failed: ${sentence(error)}`);
-      return 'refused';
-    }
+    });
   }
 
   /**

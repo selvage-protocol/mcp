@@ -259,6 +259,54 @@ test('a host puts the room\'s changes on disk, and does not create what the fold
   }
 });
 
+test('a second change for a path waits for the write-back before it, and the last text lands', async () => {
+  const root = await scratch('write-back-order');
+  try {
+    // Two changes for one path, the second landing in the window the first write-back opens
+    // between reading the replica and writing the folder — a peer typing faster than the folder
+    // follows. A write-back is a read, an emptying and a write of the same leaf, so two of them
+    // overlapped can leave one text's head over another's tail, or leave the older text on disk
+    // with no further change coming to correct it. The folder and the room both hold a
+    // session-wide text here, because that is what makes each of those reads long enough for the
+    // window to be a real one on this machine.
+    const wide = 'x'.repeat(MAX_GRANT_FILE_BYTES - 32);
+    const older = `${'A'.repeat(MAX_GRANT_FILE_BYTES - 32)}\n`;
+    const newer = 'new\n';
+    // Three landings, each one a race the chain has to lose nothing in.
+    for (let round = 0; round < 3; round += 1) {
+      await put(root, 'a.txt', `${wide}\n`);
+      let landed = false;
+      const engine = new StubEngine({
+        role: 'host',
+        invite: INVITE,
+        listing: ['a.txt'],
+        documents: ['a.txt'],
+        texts: new Map([['a.txt', older]]),
+        // The room moves on while the write-back has the text it read and has not written it.
+        onText: (path, stub) => {
+          if (!landed) {
+            landed = true;
+            stub.remote(path, newer);
+            stub.emit({ type: 'documentChanged', path });
+          }
+        },
+      });
+      const { session } = await hostOver(root, engine);
+      engine.emit({ type: 'documentChanged', path: 'a.txt' });
+      const text = await until(
+        'the folder to hold the room\'s last text',
+        () => readFile(join(root, 'a.txt'), 'utf8'),
+        (current) => current === newer,
+        3_000,
+      );
+      assert.equal(text, newer, `round ${round} holds a mixture of two changes`);
+      await session.leave();
+    }
+  } finally {
+    await remove(root);
+  }
+});
+
 test('a host keeps its own folder true to an edit it applied, and a guest writes nothing', async () => {
   const root = await scratch('own-edit');
   try {
