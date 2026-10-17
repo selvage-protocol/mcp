@@ -317,6 +317,92 @@ test('a host puts the room\'s changes on disk, and does not create what the fold
   }
 });
 
+/**
+ * The empty answer and the absent answer are two different things, and only one of them is the
+ * room saying a file is empty.
+ *
+ * `text()` answers `''` for a path this replica holds no document for, and `has` is the question
+ * that tells that from a document the room sent with no text in it (`§13.5`). A write-back that
+ * read the empty answer as the room's own would empty the host's file — the whole of it, with no
+ * further event coming to put it back — so the change is refused and recorded instead.
+ */
+test('a change for a path this replica holds no document for leaves the file alone', async () => {
+  const root = await scratch('empty-write');
+  try {
+    const before = 'the host wrote this\n';
+    await put(root, 'a.txt', before);
+    const walked = await enumerateGrant(root);
+    // The room's open set names the path — some seat is holding it — while nothing has arrived
+    // here: the engine answers `''` and `has` answers false.
+    const engine = new StubEngine({
+      role: 'host',
+      invite: INVITE,
+      listing: walked.paths,
+      documents: ['a.txt'],
+      texts: new Map(),
+    });
+    const { session } = await hostOver(root, engine);
+
+    engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    // The write-back has two possible endings — a write, or a note — and the folder is the clock
+    // for whichever this build takes. Which one it has to be is what the assertions say.
+    await until(
+      'the change to be applied or refused',
+      async () => ({
+        problems: session.status().problems.length,
+        text: await readFile(join(root, 'a.txt'), 'utf8'),
+      }),
+      (seen) => seen.problems > 0 || seen.text !== before,
+      1_000,
+    );
+    assert.equal(
+      await readFile(join(root, 'a.txt'), 'utf8'),
+      before,
+      'the write-back emptied the file',
+    );
+    const problems = session.status().problems;
+    assert.equal(problems[0]?.path, 'a.txt');
+    assert.equal(problems[0]?.cause, 'no-document');
+  } finally {
+    await remove(root);
+  }
+});
+
+/**
+ * The other side of the same question, and the reason the write-back has to ask it: a document the
+ * room holds with no text in it is a real answer — the engine publishes one by naming the path
+ * with a mark it then removes, because a `Y.Text` with nothing under it is a document no update
+ * carries — so the host's file follows it to empty. A guard that refused every empty text would
+ * leave the folder diverged from a room that said so.
+ */
+test('a change for a document the room holds empty still empties the file', async () => {
+  const root = await scratch('empty-document');
+  try {
+    await put(root, 'a.txt', 'the host wrote this\n');
+    const walked = await enumerateGrant(root);
+    const engine = new StubEngine({
+      role: 'host',
+      invite: INVITE,
+      listing: walked.paths,
+      documents: ['a.txt'],
+      texts: new Map([['a.txt', '']]),
+    });
+    const { session } = await hostOver(root, engine);
+
+    engine.emit({ type: 'documentChanged', path: 'a.txt' });
+    const emptied = await until(
+      'the folder to follow the room to empty',
+      () => readFile(join(root, 'a.txt'), 'utf8'),
+      (text) => text === '',
+      1_000,
+    );
+    assert.equal(emptied, '');
+    assert.deepEqual(session.status().problems, []);
+  } finally {
+    await remove(root);
+  }
+});
+
 test('a second change for a path waits for the write-back before it, and the last text lands', async () => {
   const root = await scratch('write-back-order');
   try {

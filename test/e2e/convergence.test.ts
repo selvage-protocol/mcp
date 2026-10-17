@@ -105,6 +105,20 @@ test('two MCP servers converge on one room through a real selvaged', { timeout: 
   );
   assert.equal(read, published);
 
+  // The room saying a document is *empty* is an answer of its own, and it reaches the host's
+  // folder: `text()` answers `''` for a path this replica holds no document for as well, so the
+  // write-back asks the engine whether it holds one at all before it reads the text. A guard that
+  // refused every empty answer would leave the folder holding what the room no longer does.
+  await guest.call('write_file', { path: 'a.txt', content: '' });
+  const emptied = await until(
+    "the host's folder to follow the room to empty",
+    () => readFile(join(hostFolder, 'a.txt'), 'utf8'),
+    (text) => text === '',
+    STEP_MS,
+  );
+  assert.equal(emptied, '');
+  assert.equal(await host.call('read_file', { path: 'a.txt' }), '', 'the room does not hold it empty');
+
   // The guest writes nothing of its own, and lists what the host shared.
   assert.deepEqual(await readdir(guestFolder), [], 'the guest wrote to its own disk');
   const listing = await guest.call('list_paths');
