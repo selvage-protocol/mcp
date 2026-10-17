@@ -497,6 +497,47 @@ type Wanted =
   | { readonly text: string; readonly replacements: number }
   | { readonly refusal: string };
 
+/**
+ * The two lines a `new_string` writes again out of the text the edit keeps, or `undefined` when
+ * it writes none.
+ *
+ * `edit_file` is a line-level tool: a caller that writes a line the document already holds is
+ * writing a copy of it, and one line is how a line is put above or below another — `"a\nb\n"`
+ * for `"b\n"` is an insertion, and the line it re-writes is the one it replaced. Two consecutive
+ * lines the kept text also holds consecutively are not that: they are a piece of the document
+ * written a second time through a line-level tool, and the room is left holding it twice. A pair
+ * of blank lines is not a piece of any document, so a pair counts only when one of its lines has
+ * something in it.
+ */
+function resentPair(hay: string, old: string, replacement: string): readonly string[] | undefined {
+  const kept = new Set<string>();
+  const lines = hay.split(old).join('').split('\n');
+  for (let at = 0; at + 1 < lines.length; at += 1) {
+    kept.add(`${lines[at]}\n${lines[at + 1]}`);
+  }
+  const written = replacement.split('\n');
+  for (let at = 0; at + 1 < written.length; at += 1) {
+    const first = written[at] ?? '';
+    const second = written[at + 1] ?? '';
+    if (first.trim() === '' && second.trim() === '') {
+      continue;
+    }
+    if (kept.has(`${first}\n${second}`)) {
+      return [first, second];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * One line of a refusal, cut so that a whole document quoted back at this server does not end up
+ * in an answer.
+ */
+function shownLine(line: string): string {
+  const shown = line.length > 60 ? `${line.slice(0, 60)}…` : line;
+  return JSON.stringify(shown);
+}
+
 function wantedText(hay: string, old: string, replacement: string, all: boolean): Wanted {
   if (old === '') {
     return { refusal: '"old_string" is empty: an edit needs the text it should replace' };
@@ -512,6 +553,12 @@ function wantedText(hay: string, old: string, replacement: string, all: boolean)
       refusal: `"old_string" appears ${occurrences} times: give a longer, unique "old_string", or set "replace_all": true to replace all ${occurrences}`,
     };
   }
+  const resent = resentPair(hay, old, replacement);
+  if (resent !== undefined) {
+    return {
+      refusal: `"new_string" writes ${shownLine(resent[0])} and ${shownLine(resent[1])} again, which the document already holds: the edit would leave that text in the room twice. Use "write_file" to replace a path's whole text, or give a "new_string" that does not write two lines the document keeps`,
+    };
+  }
   if (all) {
     const text = hay.split(old).join(replacement);
     return { text, replacements: text === hay ? 0 : occurrencesOf(hay, old) };
@@ -525,7 +572,7 @@ function editFileTool(session: Session): ToolDefinition {
   return {
     name: 'edit_file',
     description:
-      'Replace "old_string" with "new_string" in one granted path\'s shared text. Refuses, changing nothing, when "old_string" does not appear, and when it appears more than once unless "replace_all" is true: an ambiguous edit is never guessed at. Only the changed range is published to the room, and a viewer\'s edit is refused. A host\'s own folder follows the room, but this cannot create a file the folder does not already hold.',
+      'Replace "old_string" with "new_string" in one granted path\'s shared text. Refuses, changing nothing, when "old_string" does not appear, when it appears more than once unless "replace_all" is true, and when "new_string" writes two lines the document already holds again: an ambiguous edit is never guessed at, and a piece of the document written a second time through a line-level tool is what "write_file" is for. Only the changed range is published to the room, and a viewer\'s edit is refused. A host\'s own folder follows the room, but this cannot create a file the folder does not already hold.',
     inputSchema: objectSchema(
       {
         path: { type: 'string', description: 'A granted path, as list_paths spells it.' },
