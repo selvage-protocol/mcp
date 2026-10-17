@@ -15,7 +15,7 @@ import test from 'node:test';
 import type { JsonRpcResponse } from '../src/jsonrpc.ts';
 import { ToolRegistry } from '../src/registry.ts';
 import type { JsonSchema } from '../src/schema.ts';
-import { SchemaError } from '../src/schema.ts';
+import { SchemaError, validate } from '../src/schema.ts';
 import { Server, negotiateVersion } from '../src/server.ts';
 
 const NAME_SCHEMA: JsonSchema = {
@@ -180,6 +180,37 @@ test('a call names a tool that is not there, or supplies arguments that do not f
     'session.tls: unknown property',
     'extra: unknown property',
   ]);
+});
+
+test('an argument named after Object.prototype is unknown, not declared', async () => {
+  const registry = registryWith();
+  // `Object.prototype` answers to these names, so a lookup that reads through the prototype
+  // chain takes each of them for a declared property and lets it past
+  // `additionalProperties: false`. The declaration and the required check are own-property ones.
+  const cases: readonly (readonly [Record<string, unknown>, string])[] = [
+    [{ session: { port: 1 }, constructor: 1 }, 'constructor: unknown property'],
+    [{ session: { port: 1 }, toString: 1 }, 'toString: unknown property'],
+    [{ session: { port: 1 }, hasOwnProperty: 1 }, 'hasOwnProperty: unknown property'],
+    [{ session: { port: 1, valueOf: 1 } }, 'session.valueOf: unknown property'],
+    // Exactly what an argument set spells on the wire: `JSON.parse` gives `__proto__` an own
+    // entry, and reading it back off the prototype would find `Object.prototype` itself.
+    [
+      JSON.parse('{"session":{"port":1},"__proto__":1}') as Record<string, unknown>,
+      '__proto__: unknown property',
+    ],
+  ];
+  for (const [args, problem] of cases) {
+    const outcome = await registry.call('open_session', args);
+    assert.equal(outcome.kind, 'invalidArguments', `${JSON.stringify(args)} was taken as declared`);
+    assert.deepEqual(outcome.kind === 'invalidArguments' ? outcome.problems : [], [problem]);
+  }
+
+  // The same hole in the other direction: a required name is satisfied by an own property and
+  // by nothing the prototype chain happens to hold.
+  assert.deepEqual(
+    validate({}, { type: 'object', required: ['toString'], additionalProperties: false }),
+    ['toString: required property is missing'],
+  );
 });
 
 test('a call runs the handler over the arguments it checked', async () => {
