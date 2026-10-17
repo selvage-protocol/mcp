@@ -60,6 +60,11 @@ export interface StubOptions {
   readonly presence?: readonly Presence[];
   /** Called by `open`, which is where a test lets the room's text arrive — or does not. */
   readonly onOpen?: (path: string, engine: StubEngine) => void;
+  /**
+   * Called by `text`, after the answer has been read off the replica and before it is handed to
+   * the caller, which is where a test lands the room's next change in the middle of a write-back.
+   */
+  readonly onText?: (path: string, engine: StubEngine) => void;
 }
 
 export class StubEngine implements SessionEngine {
@@ -78,6 +83,7 @@ export class StubEngine implements SessionEngine {
 
   private readonly listeners = new Set<EngineEventListener>();
   private readonly onOpen: ((path: string, engine: StubEngine) => void) | undefined;
+  private readonly onText: ((path: string, engine: StubEngine) => void) | undefined;
 
   constructor(options: StubOptions = {}) {
     this.roomId = options.roomId ?? 'room-1';
@@ -90,6 +96,7 @@ export class StubEngine implements SessionEngine {
     this.peers = [...(options.peers ?? [])];
     this.presenceList = [...(options.presence ?? [])];
     this.onOpen = options.onOpen;
+    this.onText = options.onText;
   }
 
   session(): SessionInfo {
@@ -106,7 +113,9 @@ export class StubEngine implements SessionEngine {
   }
 
   text(path: string): string {
-    return this.texts.get(path) ?? '';
+    const current = this.texts.get(path) ?? '';
+    this.onText?.(path, this);
+    return current;
   }
 
   has(path: string): boolean {
