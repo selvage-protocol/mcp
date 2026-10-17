@@ -12,8 +12,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { format } from 'node:util';
 
+import { consoleToStderr } from './console.ts';
 import { ToolRegistry } from './registry.ts';
 import { Server } from './server.ts';
 import type { ServerInfo } from './server.ts';
@@ -27,18 +27,11 @@ function diagnostic(message: string): void {
   process.stderr.write(`selvage-mcp: ${message}\n`);
 }
 
-/**
- * The console is turned around before anything else can reach for it, because `console.log`
- * writes to stdout, and stdout is the protocol's: a cheerfully printed line, from this file, from
- * a tool, from the vendored engine or from a library behind it, is not a message, and a client
- * that reads one as a message is a frame out of step for the rest of the session. `console.error`
- * already goes to stderr; these three are the ones that would have gone to the wire.
- */
-for (const method of ['log', 'info', 'debug'] as const) {
-  console[method] = (...args: unknown[]): void => {
-    diagnostic(format(...args));
-  };
-}
+// The console is turned around before anything else can reach for it — this file, a tool, the
+// vendored engine, a library behind either of them — because on this runtime two thirds of it
+// writes to stdout, and stdout is the protocol's. `src/console.ts` holds why the guard is the
+// whole console rather than a list of the methods that happen to reach stdout today.
+consoleToStderr(process.stderr);
 
 /**
  * The browser-storage global the engine's own dependency reads as it is evaluated. A Node
