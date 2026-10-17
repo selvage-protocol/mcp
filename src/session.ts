@@ -460,20 +460,61 @@ export class Session {
     if (overBound(wanted)) {
       throw new SessionRefused('too-large', `${path} is over the ${MAX_GRANT_FILE_BYTES} bytes a session carries`);
     }
-    return await this.publish(path, () => wanted);
+    return await this.transform(path, () => wanted);
   }
 
   /**
-   * Applies one local change through the engine's local-change path: the replica's own text is
-   * diffed against the result and only that difference is published (§5). The ranges a caller
-   * sends are checked against the replica here, because the engine's index check is the last
+   * Applies one range through `transform`, against the replica's own text as the hold finds it:
+   * the ranges a caller sends are checked here, because the engine's index check is the last
    * thing that would fail and it fails as a `sessionError`, not as an answer.
    */
   async edit(path: string, change: TextChange): Promise<EditOutcome> {
-    return await this.publish(path, (replica) => {
+    return await this.transform(path, (replica) => {
       assertChange(change, replica.length);
       return applyChange(replica, change);
     });
+  }
+
+  /**
+   * Applies one local change through the engine's local-change path: `next` is handed the
+   * replica's own text as this hold finds it and answers what the document should hold instead.
+   * Only the difference between the two is published (§5), so a change cannot be computed against
+   * one text and applied to another — a caller that has to read the text it replaces reads it
+   * here, under the same hold, and not from a snapshot taken before. A `SessionRefused` thrown
+   * from `next` is that caller's own refusal and publishes nothing.
+   */
+  async transform(path: string, next: (replica: string) => string): Promise<EditOutcome> {
+    const engine = this.requireLive('editing a document');
+    if (engine.session().role === 'viewer') {
+      throw new SessionRefused(
+        'read-only',
+        `this seat holds ${path} in a room that seats it as a viewer, whose edits nobody else receives`,
+      );
+    }
+    const refusal = publishRefusal(path);
+    if (refusal !== undefined) {
+      throw refusal;
+    }
+    await engine.open(path);
+    let wanted: string;
+    try {
+      await this.awaitDocument(path);
+      const replica = engine.text(path);
+      wanted = next(replica);
+      if (overBound(wanted)) {
+        throw new SessionRefused('too-large', `${path} would be over the ${MAX_GRANT_FILE_BYTES} bytes a session carries`);
+      }
+      const delta = diff(replica, wanted);
+      if (delta.end > delta.start) {
+        engine.delete(path, delta.start, delta.end - delta.start);
+      }
+      if (delta.text !== '') {
+        engine.insert(path, delta.start, delta.text);
+      }
+    } finally {
+      await engine.close(path);
+    }
+    return { path, length: wanted.length, disk: await this.keepWorkingCopy(path, wanted) };
   }
 
   /** Renames this seat, which is the whole of the presence an agent publishes. */
@@ -650,41 +691,6 @@ export class Session {
         `no text for ${path} arrived within ${this.documentWaitMs} ms: the room's open set is ${open.length === 0 ? 'empty' : open.join(', ')}`,
       );
     }
-  }
-
-  /** Applies the room's text, then keeps a host's own folder true to it. */
-  private async publish(path: string, next: (replica: string) => string): Promise<EditOutcome> {
-    const engine = this.requireLive('editing a document');
-    if (engine.session().role === 'viewer') {
-      throw new SessionRefused(
-        'read-only',
-        `this seat holds ${path} in a room that seats it as a viewer, whose edits nobody else receives`,
-      );
-    }
-    const refusal = publishRefusal(path);
-    if (refusal !== undefined) {
-      throw refusal;
-    }
-    await engine.open(path);
-    let wanted: string;
-    try {
-      await this.awaitDocument(path);
-      const replica = engine.text(path);
-      wanted = next(replica);
-      if (overBound(wanted)) {
-        throw new SessionRefused('too-large', `${path} would be over the ${MAX_GRANT_FILE_BYTES} bytes a session carries`);
-      }
-      const delta = diff(replica, wanted);
-      if (delta.end > delta.start) {
-        engine.delete(path, delta.start, delta.end - delta.start);
-      }
-      if (delta.text !== '') {
-        engine.insert(path, delta.start, delta.text);
-      }
-    } finally {
-      await engine.close(path);
-    }
-    return { path, length: wanted.length, disk: await this.keepWorkingCopy(path, wanted) };
   }
 
   /** The host's own write-back, by the same clamped read as an incoming change. */

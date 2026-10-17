@@ -17,7 +17,6 @@
 
 import { stat } from 'node:fs/promises';
 
-import { diff } from '../vendor/bridge/index.ts';
 import { SessionRefused } from './session.ts';
 import type { Participant, Session, SessionRefusal, SessionStatus } from './session.ts';
 import type { CallToolResult, ToolDefinition } from './registry.ts';
@@ -392,8 +391,13 @@ function occurrencesOf(hay: string, needle: string): number {
   return count;
 }
 
-/** The result of the edit before it is published: the text to want, or the reason to refuse. */
-type Wanted = { readonly text: string } | { readonly refusal: string };
+/**
+ * What the edit should hold and how much of the text it replaced, or the reason to refuse.
+ * `replacements: 0` is an edit that would put back exactly what it took out.
+ */
+type Wanted =
+  | { readonly text: string; readonly replacements: number }
+  | { readonly refusal: string };
 
 function wantedText(hay: string, old: string, replacement: string, all: boolean): Wanted {
   if (old === '') {
@@ -411,10 +415,12 @@ function wantedText(hay: string, old: string, replacement: string, all: boolean)
     };
   }
   if (all) {
-    return { text: hay.split(old).join(replacement) };
+    const text = hay.split(old).join(replacement);
+    return { text, replacements: text === hay ? 0 : occurrencesOf(hay, old) };
   }
   const at = hay.indexOf(old);
-  return { text: hay.slice(0, at) + replacement + hay.slice(at + old.length) };
+  const text = hay.slice(0, at) + replacement + hay.slice(at + old.length);
+  return { text, replacements: text === hay ? 0 : 1 };
 }
 
 function editFileTool(session: Session): ToolDefinition {
@@ -441,26 +447,27 @@ function editFileTool(session: Session): ToolDefinition {
     async handler(args) {
       return await guarded(async () => {
         const path = argText(args, 'path');
-        const current = await session.read(path);
-        const wanted = wantedText(
-          current.text,
-          argText(args, 'old_string'),
-          argText(args, 'new_string'),
-          args['replace_all'] === true,
-        );
-        if ('refusal' in wanted) {
-          return failure(`${path}: ${wanted.refusal}`);
-        }
-        if (wanted.text === current.text) {
+        const old = argText(args, 'old_string');
+        const replacement = argText(args, 'new_string');
+        const all = args['replace_all'] === true;
+        // The text to replace is the replica's own as the hold finds it, and the replacement is
+        // worked out there: a change computed from a read taken first is a change applied to
+        // whatever range that read's offsets point at by the time it lands, which is a document
+        // that has moved. A caller's `old_string` that the live text does not hold is that
+        // caller's own mistake, and it is refused as one.
+        let replacements = 0;
+        const outcome = await session.transform(path, (live) => {
+          const wanted = wantedText(live, old, replacement, all);
+          if ('refusal' in wanted) {
+            throw new SessionRefused('bad-change', wanted.refusal);
+          }
+          replacements = wanted.replacements;
+          return wanted.text;
+        });
+        if (replacements === 0) {
           return answer(`no change to ${path}: the document already holds that text`);
         }
-        const replacements =
-          args['replace_all'] === true ? occurrencesOf(current.text, argText(args, 'old_string')) : 1;
-        const outcome = await session.edit(path, diff(current.text, wanted.text));
-        const disk =
-          outcome.disk === 'none'
-            ? ''
-            : `; the host's folder: ${outcome.disk}`;
+        const disk = outcome.disk === 'none' ? '' : `; the host's folder: ${outcome.disk}`;
         return answer(
           `edited ${path}: ${replacements} replacement(s), ${outcome.length} characters now${disk}`,
         );
