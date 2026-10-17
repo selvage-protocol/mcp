@@ -243,7 +243,11 @@ export interface EditOutcome {
 export interface SessionOptions {
   /** The engine factory. Defaults to `realEngines`; a test hands in a stub. */
   readonly engines?: EngineFactory;
-  /** How long a read or an edit waits for a document the room has not sent yet. */
+  /**
+   * How long a read or an edit waits for a document once this seat can ask the room for one. A
+   * connection whose key no state commits yet publishes nothing, so it is waited for first and
+   * separately, on the room's own `awareness_renew_ms` — see `awaitDocument`.
+   */
   readonly documentWaitMs?: number;
   /** How long a join waits for the room's listing when the state names no documents. */
   readonly grantWaitMs?: number;
