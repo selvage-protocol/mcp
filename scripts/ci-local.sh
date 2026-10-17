@@ -4,13 +4,17 @@
 # has no Docker or Podman, so `act` cannot run here).
 #
 #   scripts/ci-local.sh checks   # the `checks` job: install, typecheck, the server's suite
+#   scripts/ci-local.sh e2e      # the two-process proof: two MCP servers over stdio, one room on a
+#                                # real `selvaged`, which the runner has none of
 #   scripts/ci-local.sh lint     # actionlint over the workflow files
 #   scripts/ci-local.sh links    # lychee over README.md: every relative link and every URL the
 #                                # reader-facing prose carries
-#   scripts/ci-local.sh all      # lint + checks + links
+#   scripts/ci-local.sh all      # lint + checks + e2e + links
 #
-# Keep all three of those in step with the workflow — they run the same commands, so that a red
-# job is found here rather than on a runner.
+# Keep `checks`, `lint` and `links` in step with the workflow — they run the same commands, so that
+# a red job is found here rather than on a runner. `e2e` is the one step the runner does not run,
+# and the workflow says why: it needs a built `selvaged` from the sibling `reference_server`
+# repository, which that job does not check out.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -43,6 +47,11 @@ job_checks() {
   npm test
 }
 
+job_e2e() {
+  say "e2e: two MCP servers and a real selvaged"
+  npm run test:e2e
+}
+
 job_lint() {
   say "lint: actionlint over the workflows"
   nix shell nixpkgs#actionlint -c actionlint
@@ -59,11 +68,12 @@ job_links() {
 
 case "${1:-all}" in
   checks) job_checks ;;
+  e2e) job_e2e ;;
   lint) job_lint ;;
   links) job_links ;;
-  all) job_lint; job_checks; job_links ;;
+  all) job_lint; job_checks; job_e2e; job_links ;;
   *)
-    printf 'usage: %s [checks|lint|links|all]\n' "$0" >&2
+    printf 'usage: %s [checks|e2e|lint|links|all]\n' "$0" >&2
     exit 2
     ;;
 esac

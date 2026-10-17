@@ -37,9 +37,12 @@ jobs:
 
       - run: npm run typecheck
 
-      # The server's suite only. The flake's checks — and the `pre-commit` hook set it installs —
-      # need Nix, which this job does not set up; `scripts/ci-local.sh checks` runs them on a
-      # machine that has it.
+      # The suite the server's own processes can run. The two-process proof — two MCP servers
+      # over their stdio, editing one room on a real `selvaged` — needs a built binary from the
+      # sibling `reference_server` repository, which this job does not check out; `npm run
+      # test:e2e` runs it, and `scripts/ci-local.sh e2e` runs it with the checkout's own gates.
+      # The flake's checks — and the `pre-commit` hook set it installs — need Nix, which this job
+      # does not set up; `scripts/ci-local.sh checks` runs those on a machine that has it.
       - run: npm test
 
       # The runner has no nix, so the pinned lychee release is installed here and the link check
