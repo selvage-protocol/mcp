@@ -19,6 +19,12 @@ import { fileURLToPath } from 'node:url';
 /** The entry point `bin` names, started the way a client starts it. */
 export const ENTRY = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
 
+/** What a client process is given that a library is not. */
+export interface SpawnOptions {
+  readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
 /** How long any single wait may take before the test is failed with what was observed. */
 const WAIT_MS = 10_000;
 
@@ -58,17 +64,27 @@ export class StdioServer {
   }
 
   /** The entry point the tests drive, started under the interpreter running the tests. */
-  static start(): StdioServer {
-    return StdioServer.startCommand(process.execPath, [ENTRY]);
+  static start(options: SpawnOptions = {}): StdioServer {
+    return StdioServer.startCommand(process.execPath, [ENTRY], options);
   }
 
   /**
    * Anything at all that speaks this protocol on its standard input and output — a command and
-   * its arguments, which for `bin` means the file itself, run through its own shebang.
+   * its arguments, which for `bin` means the file itself, run through its own shebang. The
+   * options are what a client process has and a library does not: a working directory of its
+   * own, and an environment the server reads a default out of.
    */
-  static startCommand(command: string, args: readonly string[] = []): StdioServer {
+  static startCommand(
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ): StdioServer {
     return new StdioServer(
-      spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'] }),
+      spawn(command, [...args], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+      }),
     );
   }
 

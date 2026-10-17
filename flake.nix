@@ -124,6 +124,9 @@
       in {
         typecheck = mkSuite "mcp-typecheck" [selvage.node] ["npm run typecheck"];
 
+        # `npm test` and not `npm run test:e2e` beside it: the two-process proof needs a built
+        # `selvaged` from the sibling `reference_server` repository, and a sandbox has no sibling
+        # checkout. `scripts/ci-local.sh e2e`, from a checkout that has one, runs it.
         suite = mkSuite "mcp-suite" [selvage.node] ["npm test"];
 
         pre-commit = selvage.hooks;
