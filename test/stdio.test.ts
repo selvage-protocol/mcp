@@ -51,7 +51,11 @@ test('initialize answers with the negotiated version, the tool capability and it
   server.send(initialize(1, '2025-06-18'));
   const result = (await server.nextResult(1, 'the initialize result')) as Record<string, unknown>;
   assert.equal(result['protocolVersion'], '2025-06-18', 'the version the client asked for');
-  assert.deepEqual(result['capabilities'], { tools: {} }, 'the documented minimum for tools');
+  assert.deepEqual(
+    result['capabilities'],
+    { tools: {}, logging: {} },
+    'tools, and the logging channel a session notifies through',
+  );
   assert.deepEqual(result['serverInfo'], { name: 'selvage-mcp', version: PACKAGE_VERSION });
   // One request, one line, and nothing else on the stream.
   assert.equal(assertMessagesOnly(server.rawStdout()).length, 1);
@@ -218,7 +222,7 @@ test('tools/list answers one page of tools, with no cursor to keep', async (t) =
   const result = (await server.nextResult(2, 'the tools/list result')) as Record<string, unknown>;
   assert.ok(!('nextCursor' in result), 'a missing cursor is the end of the results');
 
-  // The real registry, over the real session: the nine tools an agent reads, in the order they
+  // The real registry, over the real session: the ten tools an agent reads, in the order they
   // were registered, each with a schema a caller can fill in and a description to choose by.
   const listed = result['tools'];
   assert.ok(Array.isArray(listed), `tools is a list: ${JSON.stringify(listed)}`);
@@ -239,6 +243,7 @@ test('tools/list answers one page of tools, with no cursor to keep', async (t) =
       'edit_file',
       'write_file',
       'list_participants',
+      'wait_for_change',
     ],
   );
   for (const one of tools) {
@@ -319,6 +324,57 @@ test('end of input on a live session leaves it, and the process follows its clie
   assert.deepEqual(exit, { code: 0, signal: null }, server.report());
   await server.waitForDiagnostic('leaving the session', 'the shutdown of the live session');
   assert.equal(assertMessagesOnly(server.rawStdout()).length, 2);
+});
+
+test('a session with notifications tells its client about a room change, in protocol framing only', async (t) => {
+  const server = StdioServer.startCommand(process.execPath, ['--import', LIVE_ENGINE, ENTRY], {
+    env: { ...process.env, SELVAGE_TEST_ENGINE_ANNOUNCE: 'room.txt' },
+  });
+  t.after(() => server.stop());
+  const folder = await scratch('stdio-notify');
+  t.after(() => remove(folder));
+  await put(folder, 'a.txt', 'one\n');
+
+  server.send(initialize(1, '2025-11-25'));
+  const handshake = (await server.nextResult(1, 'the initialize result')) as Record<string, unknown>;
+  assert.deepEqual(handshake['capabilities'], { tools: {}, logging: {} });
+
+  server.send({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'session_host',
+      arguments: { folder, server_url: 'ws://room.example', notify_changes: true },
+    },
+  });
+  await server.nextResult(2, 'the session_host result');
+
+  const first = JSON.parse(await server.nextLine('the arrival notification')) as {
+    method?: unknown;
+    params?: { level?: unknown; data?: Record<string, unknown> };
+  };
+  assert.equal(first.method, 'notifications/message');
+  assert.equal(first.params?.level, 'info');
+  assert.equal(first.params?.data?.['selvage'], 'document');
+  assert.equal(first.params?.data?.['path'], 'room.txt');
+  assert.equal(first.params?.data?.['appeared'], true);
+
+  const second = JSON.parse(await server.nextLine('the hunk notification', 5_000)) as {
+    method?: unknown;
+    params?: { data?: Record<string, unknown> };
+  };
+  assert.equal(second.method, 'notifications/message');
+  assert.equal(second.params?.data?.['selvage'], 'document');
+  assert.equal(second.params?.data?.['appeared'], false);
+  assert.deepEqual(second.params?.data?.['hunk'], ['     1 first', '+    2 second']);
+
+  // A notification never carries the invite's key, and every line stdout carried is a message.
+  assert.ok(!JSON.stringify(first).includes('#k='), JSON.stringify(first));
+  assert.ok(!JSON.stringify(second).includes('#k='), JSON.stringify(second));
+  const messages = assertMessagesOnly(server.rawStdout());
+  assert.equal(messages.length, 4, server.report());
+  await server.close();
 });
 
 test('a room that never answers is bounded, and the process still follows its client out', async (t) => {

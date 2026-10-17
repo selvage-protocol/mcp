@@ -34,7 +34,7 @@ function read(result: unknown): { readonly text: string; readonly isError: boole
   return { text, isError: shape.isError === true };
 }
 
-test('the official SDK initializes, lists the nine tools and calls them', { timeout: 30_000 }, async (t) => {
+test('the official SDK initializes, lists the ten tools and calls them', { timeout: 30_000 }, async (t) => {
   const cwd = await scratch('interop');
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -56,7 +56,7 @@ test('the official SDK initializes, lists the nine tools and calls them', { time
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
     TOOL_NAMES,
-    'the SDK did not read the nine tools off this server',
+    'the SDK did not read the ten tools off this server',
   );
   for (const tool of listed.tools) {
     assert.ok((tool.description ?? '').length > 0, `${tool.name} has no description for a client to choose by`);

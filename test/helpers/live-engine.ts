@@ -34,10 +34,20 @@ const { StubEngine } = await import('./stub-engine.ts');
 // and the leave never answers, so the deadline is the only thing that can end the process.
 const stuck = process.env['SELVAGE_TEST_ENGINE_STUCK'] === '1';
 
+// A path the room announces a change to, once the session is hosted, so a test can watch a
+// notification cross the real stdio framing. Two changes, spaced past the per-path window: the
+// first is the document arriving, the second a hunk against it.
+const announce = process.env['SELVAGE_TEST_ENGINE_ANNOUNCE'];
+
 const engine = new StubEngine({ role: 'host', invite: INVITE, listing: [] });
 const held = setInterval(() => undefined, 1_000);
+let announcing: NodeJS.Timeout[] = [];
 const disconnect = engine.disconnect.bind(engine);
 engine.disconnect = async (): Promise<void> => {
+  for (const timer of announcing) {
+    clearTimeout(timer);
+  }
+  announcing = [];
   if (stuck) {
     await new Promise<void>(() => undefined);
     return;
@@ -46,4 +56,18 @@ engine.disconnect = async (): Promise<void> => {
   await disconnect();
 };
 
-PeerEngine.host = (async () => engine) as unknown as typeof PeerEngine.host;
+PeerEngine.host = (async () => {
+  if (announce !== undefined && announce !== '') {
+    announcing = [
+      setTimeout(() => {
+        engine.remote(announce, 'first\n');
+        engine.emit({ type: 'documentChanged', path: announce });
+      }, 50),
+      setTimeout(() => {
+        engine.remote(announce, 'first\nsecond\n');
+        engine.emit({ type: 'documentChanged', path: announce });
+      }, 700),
+    ];
+  }
+  return engine;
+}) as unknown as typeof PeerEngine.host;
