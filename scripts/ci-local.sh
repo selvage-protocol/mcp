@@ -3,7 +3,7 @@
 # Runs the steps of .github/workflows/ci.yml on this machine, without containers (this host
 # has no Docker or Podman, so `act` cannot run here).
 #
-#   scripts/ci-local.sh checks   # the `checks` job: install, typecheck, the server's suite
+#   scripts/ci-local.sh checks   # the `checks` job: install, build, typecheck, the server's suite
 #   scripts/ci-local.sh e2e      # the two-process proof: two MCP servers over stdio, one room on a
 #                                # real `selvaged`, which the runner has none of
 #   scripts/ci-local.sh lint     # actionlint over the workflow files
@@ -41,6 +41,10 @@ run_lychee() {
 job_checks() {
   say "checks: install"
   npm ci --no-audit --no-fund
+  # `npm ci` runs `prepare`, which is this, and so does the `prepare` of a `npm pack` or a git
+  # install; it is named here so that a build that cannot run is red on its own line.
+  say "checks: build the artifact"
+  npm run build
   say "checks: typecheck"
   npm run typecheck
   say "checks: the server's suite"
