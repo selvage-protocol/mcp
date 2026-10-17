@@ -369,6 +369,57 @@ test('edit_file replaces a unique old_string and publishes only that change', as
   assert.match(textOf(result), /1 replacement/);
 });
 
+test('edit_file computes its replacement from the text under the hold, not from a read before it', async () => {
+  // The room moves on between the two opens the call used to make: the read it took first, and
+  // the hold its edit took second. A change computed against the first text and published into
+  // the second replaces a range the document no longer has — `'1 TWO\n'`, not `'1 two\n'`.
+  let opens = 0;
+  const target = new StubEngine({
+    role: 'guest',
+    listing: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+    onOpen: (path, stub) => {
+      opens += 1;
+      if (opens > 1) {
+        stub.remote(path, 'ONE TWO\n');
+      }
+    },
+  });
+  const benchmark = bench({ engine: target, session: { grantWaitMs: 0 } });
+  await call(benchmark, 'session_join', { invite: INVITE });
+
+  const result = await call(benchmark, 'edit_file', {
+    path: 'a.txt',
+    old_string: 'one',
+    new_string: '1',
+  });
+  assert.equal(
+    target.text('a.txt'),
+    '1 two\n',
+    `the edit was applied to a text the document no longer holds: ${textOf(result)}`,
+  );
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.match(textOf(result), /1 replacement/);
+
+  // And the same window closed the other way: a hold finds a text the caller's `old_string` is
+  // no longer in, which is the caller's own mistake rather than an edit to guess the range of.
+  const moved = new StubEngine({
+    role: 'guest',
+    listing: ['a.txt'],
+    texts: new Map([['a.txt', 'one two\n']]),
+    onOpen: (path, stub) => {
+      stub.remote(path, 'ONE TWO\n');
+    },
+  });
+  const movedBench = bench({ engine: moved, session: { grantWaitMs: 0 } });
+  await call(movedBench, 'session_join', { invite: INVITE });
+  const refused = failed(
+    await call(movedBench, 'edit_file', { path: 'a.txt', old_string: 'one', new_string: '1' }),
+  );
+  assert.match(refused, /does not appear/);
+  assert.equal(moved.text('a.txt'), 'ONE TWO\n', 'a refusal changes nothing');
+});
+
 test('edit_file refuses an absent old_string, and an ambiguous one unless replace_all is set', async () => {
   const target = new StubEngine({
     role: 'guest',
