@@ -313,8 +313,11 @@ const STEP = FOLDER | NO_FOLLOW;
 /** A leaf: the file itself, and never a link to one. */
 const LEAF = constants.O_RDONLY | NO_FOLLOW;
 
-/** The same leaf, opened to be replaced whole: `O_TRUNC` empties it through the descriptor. */
-const LEAF_WRITE = constants.O_WRONLY | constants.O_TRUNC | NO_FOLLOW;
+/**
+ * The same leaf, opened to be replaced whole. The truncation is `writeLeaf`'s own, taken on this
+ * descriptor once the leaf has been judged, rather than something the open does first.
+ */
+const LEAF_WRITE = constants.O_WRONLY | NO_FOLLOW;
 
 /**
  * Whether a step can be taken relative to the directory the step before it found. Linux publishes
@@ -428,11 +431,12 @@ export type GrantedWrite = { readonly kind: 'written' } | Refused;
  * This is the write side of the same clamp `readGrantedFile` reads through, and it resolves the
  * path the same way: every step is taken inside the descriptor of the directory the step before it
  * found, the leaf has to be an entry of that directory spelled exactly as it lists it
- * (`holdsName`), and it is opened `O_WRONLY | O_TRUNC | O_NOFOLLOW` *through that descriptor*
- * rather than by a name a caller assembled. A segment swapped for a symbolic link between the read
- * that accepted the path and this write is therefore refused where it is opened, and a leaf that
- * became a link is refused by the open itself; `writeFile(join(root, path))`, which re-resolves
- * every segment by name, would follow either of them out of the grant.
+ * (`holdsName`), and it is opened `O_WRONLY | O_NOFOLLOW` *through that descriptor* rather than by
+ * a name a caller assembled, judged off that descriptor and only then emptied. A segment swapped
+ * for a symbolic link between the read that accepted the path and this write is therefore refused
+ * where it is opened, and a leaf that became a link is refused by the open itself;
+ * `writeFile(join(root, path))`, which re-resolves every segment by name, would follow either of
+ * them out of the grant.
  *
  * What is not created is the point as much as what is: the path has to be a plain file the folder
  * already holds, so a path the room has and the folder does not is a refusal rather than a new
@@ -483,9 +487,12 @@ export async function writeGrantedFile(
  * One granted file's whole text replaced through the descriptor it is opened at, or why this host
  * will not write it.
  *
- * The leaf is opened with `O_NOFOLLOW` where the platform has it, and the type and the size come
- * from the descriptor that open returned rather than from an `lstat` of the same name a rename can
- * get behind. The open cannot create anything: a name the folder does not hold is `missing`.
+ * The leaf is opened with `O_NOFOLLOW` where the platform has it, and its type and its size are
+ * read off the descriptor that open returned rather than off an `lstat` of the same name a rename
+ * can get behind. It is emptied *after* those readings and not by the open: an `O_TRUNC` open
+ * truncates a file that has not been judged yet, so a file refused here as `too-large` would have
+ * been emptied on the way to the refusal. The open cannot create anything: a name the folder does
+ * not hold is `missing`.
  */
 async function writeLeaf(
   name: string,
@@ -516,6 +523,7 @@ async function writeLeaf(
     if (opened.size > MAX_GRANT_FILE_BYTES) {
       return refused('too-large');
     }
+    await handle.truncate(0);
     await handle.writeFile(text, 'utf8');
     return { kind: 'written' };
   } finally {
