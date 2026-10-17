@@ -219,6 +219,64 @@ test('a host seeds a path once while a second ask for it is in flight', async ()
   }
 });
 
+/**
+ * The other half of that check-then-act: no second ask is needed for the room to overtake a seed.
+ * A hold on a path nothing has arrived for starts a seed, and the document itself can land in the
+ * same replica while that seed is reading the folder — after its guard and before its insertion.
+ * What arrived is the room's text, and a working copy is the truth only for a path nothing has
+ * arrived for: seeding the file on top of it leaves the room holding the text twice, which is what
+ * an edit then refuses as an ambiguous `old_string`.
+ *
+ * The arrival is landed on the microtask that the read's own ask leaves behind, which is inside the
+ * folder read: that read is a file system call and settles a turn of the loop later, so this is the
+ * window itself and not a race with it. The read joins the seed already in flight, so it answers
+ * once the seed has had its say — and the answer is what says whether the file's text went in on
+ * top of the room's. The insertion trace is asserted beside it, and the folder text is a different
+ * text from the room's so that a doubling cannot be read as agreement.
+ */
+test('a host does not seed over a document the room delivers while the folder is being read', async () => {
+  const root = await scratch('seed-arrival');
+  try {
+    const folderText = 'from the folder\n';
+    const roomText = 'from the room\n';
+    await put(root, 'a.txt', folderText);
+    const walked = await enumerateGrant(root);
+    // `has` is the only ask a seed makes. The first is the seed's own guard, made while the room
+    // held nothing; the second is the read's, and it joins the seed the first one started.
+    let looks = 0;
+    const engine = new StubEngine({
+      role: 'host',
+      invite: INVITE,
+      listing: walked.paths,
+      onHas: (_path, stub) => {
+        looks += 1;
+        if (looks === 2) {
+          queueMicrotask(() => {
+            stub.remote('a.txt', roomText);
+          });
+        }
+      },
+      onOpen: (path, stub) => {
+        if (path === 'a.txt') {
+          stub.emit({ type: 'documentsChanged', documents: ['a.txt'] });
+        }
+      },
+    });
+    const { session } = await hostOver(root, engine);
+
+    const read = await session.read('a.txt');
+    assert.equal(read.text, roomText, "the read answered with the room's text");
+    assert.deepEqual(
+      engine.calls.filter((call) => call.startsWith('insert a.txt')),
+      [],
+      "the folder's text went in on top of the room's",
+    );
+    assert.equal(engine.text('a.txt'), roomText, "the room's text is the one that stands");
+  } finally {
+    await remove(root);
+  }
+});
+
 test('a host puts the room\'s changes on disk, and does not create what the folder lacks', async () => {
   const root = await scratch('apply');
   try {

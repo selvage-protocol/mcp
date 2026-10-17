@@ -61,6 +61,11 @@ export interface StubOptions {
   /** Called by `open`, which is where a test lets the room's text arrive — or does not. */
   readonly onOpen?: (path: string, engine: StubEngine) => void;
   /**
+   * Called by `has`, which is where a test sees a seed look for a document it has not found yet:
+   * the guard before the folder read, and — with the seed's own second look — once more after it.
+   */
+  readonly onHas?: (path: string, engine: StubEngine) => void;
+  /**
    * Called by `text`, after the answer has been read off the replica and before it is handed to
    * the caller, which is where a test lands the room's next change in the middle of a write-back.
    */
@@ -83,6 +88,7 @@ export class StubEngine implements SessionEngine {
 
   private readonly listeners = new Set<EngineEventListener>();
   private readonly onOpen: ((path: string, engine: StubEngine) => void) | undefined;
+  private readonly onHas: ((path: string, engine: StubEngine) => void) | undefined;
   private readonly onText: ((path: string, engine: StubEngine) => void) | undefined;
 
   constructor(options: StubOptions = {}) {
@@ -96,6 +102,7 @@ export class StubEngine implements SessionEngine {
     this.peers = [...(options.peers ?? [])];
     this.presenceList = [...(options.presence ?? [])];
     this.onOpen = options.onOpen;
+    this.onHas = options.onHas;
     this.onText = options.onText;
   }
 
@@ -119,6 +126,7 @@ export class StubEngine implements SessionEngine {
   }
 
   has(path: string): boolean {
+    this.onHas?.(path, this);
     return this.texts.has(path);
   }
 
