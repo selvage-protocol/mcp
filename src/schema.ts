@@ -220,7 +220,7 @@ function sameValue(left: unknown, right: unknown): boolean {
     const names = Object.keys(left);
     return (
       names.length === Object.keys(right).length &&
-      names.every((name) => name in right && sameValue(left[name], right[name]))
+      names.every((name) => Object.hasOwn(right, name) && sameValue(left[name], right[name]))
     );
   }
   return false;
@@ -249,12 +249,15 @@ export function validate(value: unknown, schema: JsonSchema, at = ''): string[] 
   if (isRecord(value) && types.includes('object')) {
     const properties = schema.properties ?? {};
     for (const name of schema.required ?? []) {
-      if (!(name in value)) {
+      if (!Object.hasOwn(value, name)) {
         problems.push(`${join(at, name)}: required property is missing`);
       }
     }
+    // A name that is not an own property of `properties` is not declared, even when it is one
+    // `Object.prototype` answers to: `constructor`, `toString` and `__proto__` are ordinary
+    // argument names, and reading them off the prototype would take each as its declared name.
     for (const [name, item] of Object.entries(value)) {
-      const sub = properties[name];
+      const sub = Object.hasOwn(properties, name) ? properties[name] : undefined;
       if (sub !== undefined) {
         problems.push(...validate(item, sub, join(at, name)));
         continue;
