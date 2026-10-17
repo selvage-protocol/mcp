@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { format } from 'node:util';
 
+import { ToolRegistry } from './registry.ts';
 import { Server } from './server.ts';
 import type { ServerInfo } from './server.ts';
 import { serve } from './stdio.ts';
@@ -39,6 +40,25 @@ for (const method of ['log', 'info', 'debug'] as const) {
   };
 }
 
+/**
+ * The browser-storage global the engine's own dependency reads as it is evaluated. A Node
+ * process has no `localStorage` — unless one was started with a storage file, in which case Node
+ * answers there — and merely reading the global otherwise warns. Left to itself that warning
+ * reaches stderr ahead of this process's first diagnostic, from a module that only asked whether
+ * a browser was there; answered here as absent, the dependency keeps the in-memory fallback it
+ * already uses with no browser in sight.
+ */
+Object.defineProperty(globalThis, 'localStorage', {
+  value: undefined,
+  configurable: true,
+  writable: true,
+});
+
+// Imported here rather than at the top of the file, because evaluating them is what reads the
+// global above.
+const { Session } = await import('./session.ts');
+const { createSessionTools } = await import('./tools.ts');
+
 /** The name and version this server announces, off the package it was installed as. */
 function packageInfo(): ServerInfo {
   const text = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
@@ -63,7 +83,12 @@ process.stdout.on('error', (error: unknown) => {
   process.exitCode = 1;
 });
 
-const server = new Server({ serverInfo: packageInfo(), log: diagnostic });
+const registry = new ToolRegistry();
+for (const tool of createSessionTools(new Session())) {
+  registry.register(tool);
+}
+
+const server = new Server({ serverInfo: packageInfo(), log: diagnostic, registry });
 
 try {
   await serve(server, {
