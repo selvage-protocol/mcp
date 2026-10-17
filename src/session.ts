@@ -86,6 +86,13 @@ export interface SessionListing {
 export interface SessionEngine extends Engine {
   /** The wire invite with its fragment, for a host; `undefined` for a joiner. */
   inviteUrl(): string | undefined;
+  /**
+   * The role the room's state gives this connection's own key, or `undefined` while no state
+   * commits it (`§13.4`). A connection in that window publishes nothing but its announcement
+   * (`§13.1`'s step 4) — its holds included — so this is what says whether a hold has reached the
+   * room yet, and `session().role` cannot: that one answers `guest` for a key no state commits.
+   */
+  appliedRole(): Role | undefined;
   disconnect(): Promise<void>;
   /** Ends the room for every seat; false when this connection is not the host. */
   closeRoom(): Promise<boolean>;
@@ -777,6 +784,16 @@ export class Session {
    * Waits for the room's document for `path`, bounded. A host answers its own ask from its
    * folder first; a guest waits for the host to seed it, re-reading the predicate on the room's
    * events and on a poll, and gives up at its own deadline with what it saw.
+   *
+   * Two things can be missing, and they are waited for apart, because only the second is a refusal
+   * this adapter has any right to report. A connection whose key no state commits yet publishes
+   * nothing but its announcement (`§13.1`'s step 4), so the hold it took on `path` has not reached
+   * the room and its request for what this replica lacks has not gone out: nothing has been asked
+   * for, whatever the room holds. `§7.1` lets a host fold a joiner's announcement into the publish
+   * window the state that answered an earlier one opened, so the wait for that is the room's own
+   * `awareness_renew_ms` (`§8.2`) — the number the room advertises, and never a longer deadline of
+   * this adapter's own. The document's own deadline starts once this seat can ask, which is the
+   * only moment a wait for it is a wait for an answer.
    */
   private async awaitDocument(path: string): Promise<void> {
     const engine = this.requireLive('waiting for a document');
@@ -786,6 +803,12 @@ export class Session {
     if (engine.has(path)) {
       return;
     }
+    if (!(await this.awaitSeat())) {
+      throw new SessionRefused(
+        'timed-out',
+        `no state has committed this seat within ${this.seatWaitMs()} ms, so nothing this seat publishes has reached the room and ${path} was never asked for: a host may take its own awareness_renew_ms to answer an announcement`,
+      );
+    }
     const arrived = await this.until(() => this.engine?.has(path) === true, this.documentWaitMs);
     if (!arrived) {
       const open = engine.session().documents;
@@ -794,6 +817,33 @@ export class Session {
         `no text for ${path} arrived within ${this.documentWaitMs} ms: the room's open set is ${open.length === 0 ? 'empty' : open.join(', ')}`,
       );
     }
+  }
+
+  /**
+   * Waits for a state that commits this seat's own key, which is what lets it publish at all.
+   *
+   * A connection no state commits publishes nothing but its announcement (`§13.1`'s step 4), its
+   * holds included — which is why a hold on a path nothing has arrived for asks the room for
+   * nothing until the seat is committed, and why a wait for the document a hold is about has to
+   * come after this one. The bound is the room's own renewal window (`§7.1`, `§8.2`) plus a round
+   * trip, so a room that advertises a different clock is waited for on that number.
+   */
+  private async awaitSeat(): Promise<boolean> {
+    if (this.seatCommitted()) {
+      return true;
+    }
+    return await this.until(() => this.seatCommitted(), this.seatWaitMs());
+  }
+
+  /** Whether a state has committed this seat's own key (`§13.4`), which is what a hold waits on. */
+  private seatCommitted(): boolean {
+    return this.engine?.appliedRole() !== undefined;
+  }
+
+  /** How long a seat may take to be committed: the room's renewal window, plus a round trip. */
+  private seatWaitMs(): number {
+    const renew = this.engine?.session().keepalive.awareness_renew_ms;
+    return typeof renew === 'number' && renew > 0 ? renew + SEAT_MARGIN_MS : this.documentWaitMs;
   }
 
   /**
@@ -925,6 +975,13 @@ export class Session {
 
 /** How often a bounded wait re-reads its predicate between the events that wake it. */
 const POLL_MS = 20;
+
+/**
+ * What a wait the room's own clocks bound is given beside them: one round trip, for the state a
+ * host seals and the frame it reaches this seat as, so a wait on the room's number does not expire
+ * on the same millisecond the room's own answer was sent in.
+ */
+const SEAT_MARGIN_MS = 1_000;
 
 /**
  * What to do with a path this session is asked to publish into the room: the grant's own name
