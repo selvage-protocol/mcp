@@ -176,6 +176,49 @@ test('a host answers a hold from its own folder, and a read goes through the sha
   }
 });
 
+test('a host seeds a path once while a second ask for it is in flight', async () => {
+  const root = await scratch('one-seed');
+  try {
+    const body = 'from the folder\n';
+    await put(root, 'a.txt', body);
+    const walked = await enumerateGrant(root);
+    // The room says it is holding the path while this process is opening it. With the real
+    // engine that is the hold's own echo arriving during `open`, and it starts a seed that is
+    // still reading the folder when the read that took the hold asks for the same document:
+    // two callers of one seed, one of them the room's event and one of them the read.
+    const engine = new StubEngine({
+      role: 'host',
+      invite: INVITE,
+      listing: walked.paths,
+      onOpen: (path, stub) => {
+        if (path === 'a.txt') {
+          stub.emit({ type: 'documentsChanged', documents: ['a.txt'] });
+        }
+      },
+    });
+    const { session } = await hostOver(root, engine);
+
+    const read = await session.read('a.txt');
+    assert.equal(read.text, body, 'the read answered with the seeded text');
+    assert.equal(
+      await until(
+        'a.txt to hold the folder text once',
+        () => engine.text('a.txt'),
+        (text) => text === body,
+        1_000,
+      ),
+      body,
+    );
+    // One insertion, not two: the second ask joined the seed already reading the folder.
+    assert.deepEqual(
+      engine.calls.filter((call) => call.startsWith('insert ')),
+      [`insert a.txt 0 ${JSON.stringify(body)}`],
+    );
+  } finally {
+    await remove(root);
+  }
+});
+
 test('a host puts the room\'s changes on disk, and does not create what the folder lacks', async () => {
   const root = await scratch('apply');
   try {
