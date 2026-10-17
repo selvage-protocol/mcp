@@ -304,6 +304,15 @@ async function isShareableFile(absolute: string): Promise<boolean> {
  */
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
+/**
+ * `O_NONBLOCK` where the platform has it, for the write leaf's open and nothing else. It is a
+ * no-op for the regular file that open is written for, and it is the difference between a FIFO
+ * with no reader waiting for one forever and answering `ENXIO` (`stepRefusal`) straight away. It
+ * does not decide anything about the leaf: the type is still read off the descriptor afterwards,
+ * so a FIFO a reader *is* holding open is opened and refused rather than written through.
+ */
+const NON_BLOCK = constants.O_NONBLOCK ?? 0;
+
 /** The folder a session shares: a link at the root *is* the folder the caller named. */
 const FOLDER = constants.O_RDONLY | constants.O_DIRECTORY;
 
@@ -317,7 +326,7 @@ const LEAF = constants.O_RDONLY | NO_FOLLOW;
  * The same leaf, opened to be replaced whole. The truncation is `writeLeaf`'s own, taken on this
  * descriptor once the leaf has been judged, rather than something the open does first.
  */
-const LEAF_WRITE = constants.O_WRONLY | NO_FOLLOW;
+const LEAF_WRITE = constants.O_WRONLY | NO_FOLLOW | NON_BLOCK;
 
 /**
  * Whether a step can be taken relative to the directory the step before it found. Linux publishes
@@ -431,8 +440,9 @@ export type GrantedWrite = { readonly kind: 'written' } | Refused;
  * This is the write side of the same clamp `readGrantedFile` reads through, and it resolves the
  * path the same way: every step is taken inside the descriptor of the directory the step before it
  * found, the leaf has to be an entry of that directory spelled exactly as it lists it
- * (`holdsName`), and it is opened `O_WRONLY | O_NOFOLLOW` *through that descriptor* rather than by
- * a name a caller assembled, judged off that descriptor and only then emptied. A segment swapped
+ * (`holdsName`), and it is opened `O_WRONLY | O_NOFOLLOW | O_NONBLOCK` *through that descriptor*
+ * rather than by a name a caller assembled, judged off that descriptor and only then emptied. A
+ * segment swapped
  * for a symbolic link between the read that accepted the path and this write is therefore refused
  * where it is opened, and a leaf that became a link is refused by the open itself;
  * `writeFile(join(root, path))`, which re-resolves every segment by name, would follow either of
@@ -492,7 +502,9 @@ export async function writeGrantedFile(
  * can get behind. It is emptied *after* those readings and not by the open: an `O_TRUNC` open
  * truncates a file that has not been judged yet, so a file refused here as `too-large` would have
  * been emptied on the way to the refusal. The open cannot create anything: a name the folder does
- * not hold is `missing`.
+ * not hold is `missing`. It does not wait for a reader either: `O_NONBLOCK` (`NON_BLOCK`) is on
+ * this open, so a leaf that is a FIFO with no reader answers `ENXIO` — refused `not-a-file` —
+ * instead of holding the write-back until some other process happens to open the other end.
  */
 async function writeLeaf(
   name: string,
@@ -558,6 +570,12 @@ type GoverningFound =
  * system refuses — a link where a directory has to be, a name that is not a directory — is
  * `not-a-file`. Steps are opened with `O_NOFOLLOW` where the platform has it, so a link is
  * refused as one rather than followed.
+ *
+ * `ENXIO` — what the write leaf's open answers under `NON_BLOCK` when the leaf is a FIFO with no
+ * reader — is one of those anything-elses, and `not-a-file` is the ruling the clamp would have
+ * reached had the open returned and `writeLeaf` read the type off the descriptor. It is
+ * deliberately not `missing`: the folder does hold that name, and what it holds is not a plain
+ * file.
  */
 function stepRefusal(error: unknown): GrantRefusal {
   if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
