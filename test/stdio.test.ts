@@ -212,8 +212,43 @@ test('tools/list answers one page of tools, with no cursor to keep', async (t) =
   await server.nextResult(1, 'the initialize result');
   server.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const result = (await server.nextResult(2, 'the tools/list result')) as Record<string, unknown>;
-  assert.deepEqual(result['tools'], []);
   assert.ok(!('nextCursor' in result), 'a missing cursor is the end of the results');
+
+  // The real registry, over the real session: the nine tools an agent reads, in the order they
+  // were registered, each with a schema a caller can fill in and a description to choose by.
+  const listed = result['tools'];
+  assert.ok(Array.isArray(listed), `tools is a list: ${JSON.stringify(listed)}`);
+  const tools = listed as readonly {
+    readonly name: unknown;
+    readonly description: unknown;
+    readonly inputSchema: Record<string, unknown>;
+  }[];
+  assert.deepEqual(
+    tools.map((one) => one.name),
+    [
+      'session_host',
+      'session_join',
+      'session_status',
+      'session_leave',
+      'list_paths',
+      'read_file',
+      'edit_file',
+      'write_file',
+      'list_participants',
+    ],
+  );
+  for (const one of tools) {
+    const name = String(one.name);
+    assert.equal(typeof one.description, 'string', name);
+    assert.ok((one.description as string).length > 80, `${name} needs a description to choose by`);
+    assert.equal(one.inputSchema['type'], 'object', name);
+    assert.equal(one.inputSchema['additionalProperties'], false, name);
+    const properties = one.inputSchema['properties'];
+    assert.ok(typeof properties === 'object' && properties !== null, `${name} names no properties`);
+    for (const required of (one.inputSchema['required'] ?? []) as readonly string[]) {
+      assert.ok(required in properties, `${name} requires "${required}" without naming it`);
+    }
+  }
   await server.close();
 });
 
