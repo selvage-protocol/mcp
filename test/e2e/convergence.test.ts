@@ -14,74 +14,12 @@
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test from 'node:test';
 
+import { STEP_MS, Tool } from '../helpers/mcp-tool.ts';
 import { put, scratch } from '../helpers/scratch.ts';
 import { RealSelvaged, selvagedBinary } from '../helpers/selvaged.ts';
-import { StdioServer, type SpawnOptions } from '../helpers/stdio-client.ts';
 import { until } from '../helpers/until.ts';
-
-/** The deadline a single step has, and the whole proof's own bound. */
-const STEP_MS = 20_000;
-
-/** One MCP server process, called the way a client calls it. */
-class Tool {
-  private nextId = 1;
-  private readonly label: string;
-  private readonly server: StdioServer;
-
-  private constructor(label: string, server: StdioServer) {
-    this.label = label;
-    this.server = server;
-  }
-
-  static async start(t: TestContext, label: string, options: SpawnOptions): Promise<Tool> {
-    const server = StdioServer.start(options);
-    t.after(() => server.stop());
-    const tool = new Tool(label, server);
-    server.send({
-      jsonrpc: '2.0',
-      id: tool.nextId++,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-11-25',
-        capabilities: {},
-        clientInfo: { name: label, version: '1' },
-      },
-    });
-    await server.nextResult(1, `${label}'s initialize result`);
-    server.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-    return tool;
-  }
-
-  /** One `tools/call`, returning what it answered in band — a refusal included. */
-  async raw(
-    name: string,
-    args: Record<string, unknown> = {},
-    ms: number = STEP_MS,
-  ): Promise<string> {
-    const id = this.nextId++;
-    this.server.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
-    const result = (await this.server.nextResult(id, `${name} on ${this.label}`, ms)) as {
-      readonly content?: readonly { readonly text?: string }[];
-      readonly isError?: boolean;
-    };
-    const text = (result.content ?? []).map((block) => block.text ?? '').join('');
-    return result.isError === true ? `refused: ${text}` : text;
-  }
-
-  /** One `tools/call` that has to work. */
-  async call(name: string, args: Record<string, unknown> = {}, ms: number = STEP_MS): Promise<string> {
-    const text = await this.raw(name, args, ms);
-    assert.ok(!text.startsWith('refused: '), `${name} on ${this.label} failed: ${text}`);
-    return text;
-  }
-
-  /** Everything this server has written, for a failure message. */
-  report(): string {
-    return `${this.label}: ${this.server.report()}`;
-  }
-}
 
 function roomIdOf(hosted: string): string {
   const match = /^hosting room (\S+) as (\S+),/.exec(hosted);
