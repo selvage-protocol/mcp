@@ -3,19 +3,20 @@
  * what the imports need in order to resolve. Both are checkable, and an untrue one is a defect
  * that a client discovers instead of a test.
  *
- * `bin.selvage-mcp` points straight at TypeScript, which is only honest because Node strips the
- * types itself from 22.18 on, with the flag the repository's `engines` names. This file starts the
- * declared target the way the shell would — through the file's own shebang — rather than through
- * `node <path>`, so the claim that it is startable is the claim actually tested.
+ * `bin.selvage-mcp` points at `dist/main.js`, which `npm run build` writes and `prepare` runs — so
+ * a checkout that has installed its dependencies has it, and one that has not is a failure here
+ * rather than a pass. This file starts the declared target the way the shell would — through the
+ * file's own shebang — rather than through `node <path>`, so the claim that it is startable is the
+ * claim actually tested. What the packed package does with it is `packed.test.ts`.
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { StdioServer } from './helpers/stdio-client.ts';
+import { startFile } from './helpers/stdio-client.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -65,29 +66,22 @@ test('the command `bin` names exists, is executable, and runs the server', async
   );
 
   // The shebang names `/usr/bin/env`, and a Nix build sandbox has no `/usr/bin` at all, so the
-  // kernel cannot exec the file there at all. Both branches start the same file and hold it to the
-  // same answer; only the interpreter that ends up running it differs, and which one it was is
-  // said in the failure.
-  const through = existsSync('/usr/bin/env')
-    ? { what: 'through its own shebang', command: path, args: [] as string[] }
-    : {
-        what: 'under the Node this suite runs on, the sandbox having no /usr/bin/env',
-        command: process.execPath,
-        args: [path],
-      };
-  const server = StdioServer.startCommand(through.command, through.args);
+  // kernel cannot exec the file there at all; `startFile` is the two branches, and the failure
+  // message says which one ran it.
+  const { server, how } = startFile(path);
   t.after(() => server.stop());
   server.send({ jsonrpc: '2.0', id: 1, method: 'ping' });
-  const what = `a ping answered by the command \`bin\` names, run ${through.what}`;
+  const what = `a ping answered by the command \`bin\` names, run ${how}`;
   assert.deepEqual(await server.nextResult(1, what), {});
   assert.equal((await server.close()).code, 0, server.report());
 
-  // The shebang is only true from 22.18 on, where Node strips the types without being asked.
+  // The suite is TypeScript, and `node --test` strips the types without being asked from 22.18
+  // on; the artifact the package ships is built for the same floor.
   const floor = (manifest.engines?.node ?? '').replace(/^[^0-9]*/, '');
   const [major, minor] = floor.split('.').map(Number) as [number, number];
   assert.ok(
     major > 22 || (major === 22 && minor >= 18),
-    `engines.node is "${floor}", and a TypeScript entry point needs 22.18`,
+    `engines.node is "${floor}", and the suite's own TypeScript needs 22.18`,
   );
 });
 
@@ -116,4 +110,9 @@ test('every bare specifier is declared, and the engine sits in `dependencies`', 
   }
   assert.ok(manifest.devDependencies?.['@types/ws'] !== undefined, '@types/ws belongs in dev');
   assert.equal(manifest.dependencies?.['@types/ws'], undefined, 'a types-only package is not runtime');
+
+  // The build tool is not the server: an installed package runs `dist/`, which `prepare` wrote
+  // before the tarball was packed, so nothing at run time reaches for a bundler.
+  assert.ok(manifest.devDependencies?.['esbuild'] !== undefined, 'esbuild belongs in dev');
+  assert.equal(manifest.dependencies?.['esbuild'], undefined, 'a build tool is not runtime');
 });

@@ -14,6 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /** The entry point `bin` names, started the way a client starts it. */
@@ -261,6 +262,25 @@ export class StdioServer {
       });
     });
   }
+}
+
+/**
+ * A file started the way a shell starts it — through its own shebang — or, where there is no
+ * `/usr/bin/env` to find an interpreter with (a Nix build sandbox has no `/usr/bin` at all),
+ * under the Node this suite runs on. Both branches run the same file and answer the same way;
+ * only the interpreter that ends up running it differs, and `how` says which one it was, for a
+ * failure message to name.
+ */
+export function startFile(
+  path: string,
+  options: SpawnOptions = {},
+): { readonly server: StdioServer; readonly how: string } {
+  return existsSync('/usr/bin/env')
+    ? { server: StdioServer.startCommand(path, [], options), how: 'through its own shebang' }
+    : {
+        server: StdioServer.startCommand(process.execPath, [path], options),
+        how: 'under the Node this suite runs on, the sandbox having no /usr/bin/env',
+      };
 }
 
 /**

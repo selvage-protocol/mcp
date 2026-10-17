@@ -21,19 +21,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { scratch } from './helpers/scratch.ts';
 import { ENTRY } from './helpers/stdio-client.ts';
-
-/** The nine tools this server serves, as a caller reads them off `tools/list`. */
-const TOOLS = [
-  'edit_file',
-  'list_participants',
-  'list_paths',
-  'read_file',
-  'session_host',
-  'session_join',
-  'session_leave',
-  'session_status',
-  'write_file',
-];
+import { TOOL_NAMES } from './helpers/tool-names.ts';
 
 /** What one result carries, read the way a caller reads it: the text blocks, and the flag. */
 function read(result: unknown): { readonly text: string; readonly isError: boolean } {
@@ -67,7 +55,7 @@ test('the official SDK initializes, lists the nine tools and calls them', { time
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    TOOLS,
+    TOOL_NAMES,
     'the SDK did not read the nine tools off this server',
   );
   for (const tool of listed.tools) {
