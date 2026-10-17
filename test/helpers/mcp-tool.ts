@@ -42,16 +42,32 @@ export class Tool {
     return tool;
   }
 
-  /** One `tools/call`, returning what it answered in band — a refusal included. */
-  async raw(name: string, args: Record<string, unknown> = {}, ms: number = STEP_MS): Promise<string> {
+  /**
+   * One `tools/call` sent without waiting for its answer, so a call can be held in the background
+   * while other calls on the same server are made. Answers with the id to read it back by.
+   */
+  send(name: string, args: Record<string, unknown> = {}): number {
     const id = this.nextId++;
     this.server.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+    return id;
+  }
+
+  /**
+   * The answer to a call `send` started, read when it is the next thing this server writes. Every
+   * call made in between has to have been read already, because the line read is the next one.
+   */
+  async answered(id: number, name: string, ms: number = STEP_MS): Promise<string> {
     const result = (await this.server.nextResult(id, `${name} on ${this.label}`, ms)) as {
       readonly content?: readonly { readonly text?: string }[];
       readonly isError?: boolean;
     };
     const text = (result.content ?? []).map((block) => block.text ?? '').join('');
     return result.isError === true ? `refused: ${text}` : text;
+  }
+
+  /** One `tools/call`, returning what it answered in band — a refusal included. */
+  async raw(name: string, args: Record<string, unknown> = {}, ms: number = STEP_MS): Promise<string> {
+    return await this.answered(this.send(name, args), name, ms);
   }
 
   /** One `tools/call` that has to work. */
