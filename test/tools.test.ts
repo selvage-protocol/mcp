@@ -509,6 +509,39 @@ test('an old_string that only overlaps itself is ambiguous, and replace_all stil
   assert.match(textOf(all), /1 replacement/);
 });
 
+test('edit_file refuses a new_string that writes a piece of the document again', async () => {
+  const body = '# Notes\n\n- [ ] one\n\nthe end\n';
+  const target = new StubEngine({
+    role: 'host',
+    listing: ['a.txt'],
+    texts: new Map([['a.txt', body]]),
+  });
+  const benchmark = bench({ engine: target, session: { grantWaitMs: 0 } });
+  await call(benchmark, 'session_join', { invite: INVITE });
+
+  // The shape a live session doubled a document with: the reply written as the document the
+  // caller read, plus the reply — a whole piece of the document sent through a line-level tool.
+  const refused = failed(
+    await call(benchmark, 'edit_file', {
+      path: 'a.txt',
+      old_string: 'the end',
+      new_string: `${body}\nDoing well.\n`,
+    }),
+  );
+  assert.match(refused, /writes "# Notes" and "" again/);
+  assert.match(refused, /write_file/);
+  assert.equal(target.text('a.txt'), body, 'a refusal changes nothing');
+
+  // One line written again is how a line is put above another, and it is not a copy of anything.
+  const inserted = await call(benchmark, 'edit_file', {
+    path: 'a.txt',
+    old_string: 'the end',
+    new_string: '- [x] one\n\nthe end',
+  });
+  assert.equal(inserted.isError, undefined, textOf(inserted));
+  assert.equal(target.text('a.txt'), '# Notes\n\n- [ ] one\n\n- [x] one\n\nthe end\n');
+});
+
 test('write_file replaces the whole shared text, and a viewer is refused', async () => {
   const target = new StubEngine({
     role: 'guest',
