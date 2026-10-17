@@ -49,6 +49,15 @@ nothing to answer a question with, so `session_host` falls back to this variable
 address `selvaged` prints. `SELVAGE_DISPLAY_NAME` is the name the other seats see; without it
 this server seats itself as `agent`.
 
+`SELVAGE_PUBLISH_CURSOR` is the fallback for a `publish_cursor` argument on either session tool,
+and it is off unless it is set to one of `1`, `true`, `yes` or `on`. With it on, the server
+publishes a cursor for the path each `read_file`, `edit_file` and `write_file` touches — a
+position in the room's document, renewed on the room's awareness clock and cleared when the
+session ends — so a person sharing the file can see which file the agent has open and roughly
+where in it. It is off by default because a caret in someone's editor says the agent is there,
+and an agent that never asked for that should not have one invented for it. It is a position and
+nothing more: it says the last tool call landed there, not that the agent is looking.
+
 A first session:
 
 1. Start `selvaged` and note the address it prints.
@@ -71,7 +80,7 @@ A first session:
 | `read_file` | The room's text for one shared path. |
 | `edit_file` | Replace `old_string` with `new_string` in a shared file, refusing an absent or an ambiguous match unless `replace_all` is set. |
 | `write_file` | Replace a shared file's whole text. |
-| `list_participants` | One line per seat: name, role, whether it is this connection, and the cursor a seat publishes — which this server never does. |
+| `list_participants` | One line per seat: name, role, whether it is this connection, and the cursor a seat publishes — which this server does only when asked to. |
 
 ## What it cannot do
 
@@ -83,9 +92,11 @@ A first session:
   until a new session, and no folder watcher runs on this side.
 - **A guest writes nothing to disk.** The room's text lives in the agent's replica; a guest's
   edits go to the room and nowhere else. Hosting is the only direction that touches a disk.
-- **The agent publishes an identity but no cursor.** A seat appears in the room with its name and
-  its role, and nothing else: no selection and no caret. `list_participants` reads `no cursor
-  seen` beside this server's seat, and an editor client draws it as a name without a cursor.
+- **A published cursor is a position, not attention.** Off by default, and when on it sits where
+  the last `read_file`, `edit_file` or `write_file` touched the path — the end of the range an
+  edit changed, the start of the file for a read — and stays there between calls. It is renewed
+  on the room's awareness clock and cleared when the session ends, and it says nothing about what
+  the agent is reading.
 - **The invite fragment is a credential.** It is the room's key, so an invite link is as sensitive
   as the room itself: anything that holds the link can join and read what the host shares. A
   failed join reports the URL as `[invite]` rather than echoing the key.
