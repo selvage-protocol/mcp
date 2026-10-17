@@ -7,11 +7,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { MAX_GRANT_FILE_BYTES } from '../vendor/bridge/index.ts';
 import { enumerateGrant, writeGrantedFile } from '../src/grant.ts';
 import { Session, SessionRefused } from '../src/session.ts';
 import type { SessionRefusal } from '../src/session.ts';
@@ -344,5 +345,23 @@ test('a write reaches a nested path through the directories the folder holds', a
   } finally {
     await remove(root);
     await remove(outside);
+  }
+});
+
+test('a leaf over the size a session carries is refused, and left as it was', async () => {
+  const root = await scratch('write-bound');
+  try {
+    // A file this size is one the read refuses, so the room's text for it is not this host's to
+    // write either. What the refusal may not do is empty the file on the way to saying no: a leaf
+    // truncated as it is opened has been destroyed by the time anything about it is judged.
+    const over = 'x'.repeat(MAX_GRANT_FILE_BYTES + 1);
+    await put(root, 'big.txt', over);
+    assert.deepEqual(await writeGrantedFile(root, 'big.txt', 'small\n'), {
+      kind: 'refused',
+      cause: 'too-large',
+    });
+    assert.equal(statSync(join(root, 'big.txt')).size, MAX_GRANT_FILE_BYTES + 1);
+  } finally {
+    await remove(root);
   }
 });
