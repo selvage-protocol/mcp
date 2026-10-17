@@ -203,9 +203,10 @@ export class StubEngine implements SessionEngine {
 export class StubFactory implements EngineFactory {
   readonly hosted: HostEngineOptions[] = [];
   readonly joined: JoinEngineOptions[] = [];
-  /** What `host` answers with; a test sets it before the session opens. */
+  /** What `host` answers with, or throws; a test sets one of them before the session opens. */
   hostResult: StubEngine | undefined;
-  /** What `join` answers with, or throws. */
+  hostError: unknown;
+  /** The same for `join`. */
   joinResult: StubEngine | undefined;
   joinError: unknown;
 
@@ -216,6 +217,9 @@ export class StubFactory implements EngineFactory {
 
   async host(options: HostEngineOptions): Promise<StubEngine> {
     this.hosted.push(options);
+    if (this.hostError !== undefined) {
+      throw this.hostError;
+    }
     return this.hostResult ?? new StubEngine({ role: 'host' });
   }
 

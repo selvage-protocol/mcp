@@ -57,6 +57,7 @@ const REFUSALS: Readonly<Record<SessionRefusal, string>> = {
   'no-session': 'there is no live session',
   'not-a-server': 'that is not a session address',
   'join-failed': 'the join did not go through',
+  'host-failed': 'the host did not come up',
   'no-invite': 'that invite carries no usable room',
   'not-granted': 'the room granted no such path',
   missing: 'it is not in the room or in the folder',

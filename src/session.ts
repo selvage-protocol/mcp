@@ -49,6 +49,7 @@ export type SessionRefusal =
   | 'no-session'
   | 'not-a-server'
   | 'join-failed'
+  | 'host-failed'
   | 'no-invite'
   | 'not-granted'
   | 'missing'
@@ -297,21 +298,38 @@ export class Session {
    *
    * The listing is in the engine's hands before the room is minted, so the first state a seat
    * ever receives already names this folder (`§7.1`).
+   *
+   * An engine that will not open the room is refused `host-failed`, the way a join is: a server
+   * this process cannot reach is the caller's own address, and it belongs in an answer the caller
+   * can read rather than in a fault of this server. The address is taken out of both refusals,
+   * because a caller may have spelled it as an invite and a refusal is prose that can be logged.
    */
   async host(options: HostOptions): Promise<HostedSession> {
     this.assertFree('host');
-    const base = sessionBase(options.serverUrl);
+    const address = options.serverUrl.trim();
+    const base = sessionBase(address);
     if (base === undefined) {
-      throw new SessionRefused('not-a-server', `not a session address: ${options.serverUrl}`);
+      throw new SessionRefused(
+        'not-a-server',
+        masked(address, `not a session address: ${address}`, '[address]'),
+      );
     }
     const root = resolve(options.root);
     const walked = await enumerateGrant(root);
     this.listing.replace(walked.paths);
-    const engine = await this.engines.host({
-      baseUrl: base,
-      displayName: options.displayName,
-      listing: this.listing,
-    });
+    let engine: SessionEngine;
+    try {
+      engine = await this.engines.host({
+        baseUrl: base,
+        displayName: options.displayName,
+        listing: this.listing,
+      });
+    } catch (error: unknown) {
+      throw new SessionRefused(
+        'host-failed',
+        masked(address, sentence(error), '[address]'),
+      );
+    }
     this.adopt(engine, 'host', root, walked.cut);
     const invite = engine.inviteUrl();
     if (invite === undefined) {
@@ -340,7 +358,7 @@ export class Session {
     try {
       engine = await this.engines.join({ invite, displayName: options.displayName });
     } catch (error: unknown) {
-      throw new SessionRefused('join-failed', masked(invite, error));
+      throw new SessionRefused('join-failed', masked(invite, sentence(error)));
     }
     this.adopt(engine, 'guest', undefined, undefined);
     await this.settleGrant();
@@ -866,16 +884,17 @@ function sentence(error: unknown): string {
 }
 
 /**
- * A failure read back without `secret` in it, when there is one to take out. An invite's fragment
- * is a room key, and a refusal that quotes the link is a refusal that can be logged, shown or
- * written to a file with the key in it; it is used for an address a caller handed to a host for
- * the same reason, because an invite handed where an address belongs is such a link.
+/**
+ * `text` read back without `secret` in it, when there is one to take out. An invite's fragment is
+ * a room key, and a refusal that quotes the link is a refusal that can be logged, shown or written
+ * to a file with the key in it; an address a caller hands to `host` is taken out for the same
+ * reason, because an invite handed where an address belongs is such a link.
  *
- * An empty secret is nothing to take out, and splitting on it would put `[invite]` between every
- * two characters of the message instead of masking anything: an invite that trims to nothing is
- * what a caller reaches with an empty or whitespace `invite`.
+ * `secret` is the one string this server knows could be a credential, and it is the caller's own:
+ * an engine that fails after minting a link of its own is not reached, because a host that fails
+ * never has an invite in this process's hands. An empty secret is nothing to take out, and
+ * splitting on it would put the placeholder between every two characters of the message instead.
  */
-function masked(secret: string, error: unknown): string {
-  const text = sentence(error);
-  return secret === '' ? text : text.split(secret).join('[invite]');
+function masked(secret: string, text: string, placeholder = '[invite]'): string {
+  return secret === '' ? text : text.split(secret).join(placeholder);
 }

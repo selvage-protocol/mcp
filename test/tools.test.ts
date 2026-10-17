@@ -150,6 +150,28 @@ test('the server address falls back to SELVAGE_SERVER_URL, and its absence names
   }
 });
 
+test('a host the engine will not open comes back as an error result, not as an internal error', async () => {
+  const root = await scratch('tools-host-failed');
+  try {
+    await put(root, 'a.txt', 'one\n');
+    const benchmark = bench();
+    benchmark.factory.hostError = new Error('the connection was refused');
+    const refused = failed(
+      await call(benchmark, 'session_host', {
+        folder: root,
+        server_url: 'ws://room.example',
+      }),
+    );
+    // Everything the caller did wrong comes back as a result they can see and correct, and a
+    // server that is not up is the caller's address rather than a fault of this process.
+    assert.match(refused, /did not come up/);
+    assert.ok(!refused.includes('host-failed'), `a refusal code is internal: ${refused}`);
+    assert.equal(benchmark.session.hasSession(), false);
+  } finally {
+    await remove(root);
+  }
+});
+
 test('the display name is the argument, then the variable, then the fixed default', async () => {
   const root = await scratch('tools-name');
   try {
