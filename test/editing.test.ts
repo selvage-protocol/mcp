@@ -9,9 +9,8 @@
  * The corpus is generated rather than listed, and from a seed of its own rather than from the
  * clock: a case that fails is one a reader reaches again by running the test again. What it
  * covers is what a document can hold — newlines, a carriage return, and a two-code-unit character
- * whose halves a range must never fall between. It holds no lone surrogate, because none is
- * reachable: a granted file is decoded as strict UTF-8, and an editor's buffer holds whole
- * characters.
+ * whose halves a range must never fall between. Malformed strings are tested separately: a tool
+ * can supply a lone surrogate even though a granted file is decoded as strict UTF-8.
  */
 
 import assert from 'node:assert/strict';
@@ -85,4 +84,26 @@ test('the smallest change between two texts reproduces the second, in whole and 
       `the inserted text begins or ends with half a character: ${described}`,
     );
   }
+});
+
+test('diff refuses malformed UTF-16 in from, to, and equal inputs', () => {
+  for (const malformed of ['\ud800', '\udfff', 'a\ud800b', 'a\udfffb', '\udc00\ud800', '😀\ud800']) {
+    for (const [from, to] of [[malformed, 'valid😀'], ['valid😀', malformed], [malformed, malformed]] as const) {
+      assert.throws(() => diff(from, to), {
+        name: 'RangeError',
+        message: 'cannot diff text containing an unpaired UTF-16 surrogate',
+      });
+    }
+  }
+});
+
+test('diff preserves whole astral replacements and equal valid inputs', () => {
+  for (const [from, to, inserted] of [
+    ['x😀y', 'x😁y', '😁'], ['x𐀀y', 'x𐐀y', '𐐀'], ['', '😀', '😀'], ['😀', '', ''],
+  ] as const) {
+    const change = diff(from, to);
+    assert.equal(applyChange(from, change), to);
+    assert.equal(change.text, inserted);
+  }
+  assert.deepEqual(diff('😀', '😀'), { start: 0, end: 0, text: '' });
 });

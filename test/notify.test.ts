@@ -196,3 +196,45 @@ test('the whole client cannot be stormed either: a window holds at most twenty m
   assert.ok(activities.length <= 20, `a window let ${activities.length} through`);
   assert.ok(activities.length > 0);
 });
+
+test('malformed notifications keep both baselines and the rate window for valid recovery', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const engine = stub('before😀\n');
+  const activities: Activity[] = [];
+  const session = await announcing(engine, activities);
+  await session.waitForChange({ timeoutMs: 100 });
+  fromRoom(engine, 'a.txt', 'announced😁\n');
+  assert.equal(activities.length, 1);
+  now += 501;
+  for (const malformed of ['bad\ud800\n', 'bad\udfff\n', 'bad\udfff\n']) {
+    assert.doesNotThrow(() => fromRoom(engine, 'a.txt', malformed));
+    assert.equal(activities.length, 1, 'malformed content was not announced');
+    assert.equal(engine.text('a.txt'), malformed, 'refusal did not normalize the replica');
+  }
+  assert.equal(session.status().problems.at(-1)?.cause, 'bad-change');
+  await assert.rejects(session.waitForChange({ timeoutMs: 100 }), { name: 'SessionRefused', code: 'bad-change' });
+  fromRoom(engine, 'a.txt', 'recovered😀\n');
+  assert.equal(activities.length, 2, 'refusal did not consume the notification rate window');
+  const recovered = activities[1];
+  assert.equal(recovered?.kind, 'document');
+  assert.deepEqual(recovered?.kind === 'document' ? recovered.hunk : undefined, [
+    '-    1 announced😁', '+    1 recovered😀',
+  ]);
+  const report = await session.waitForChange({ timeoutMs: 100 });
+  assert.deepEqual(report.changes[0]?.hunk, ['-    1 before😀', '+    1 recovered😀']);
+});
+
+test('a malformed notification arrival refuses without losing the later valid arrival', async () => {
+  const engine = new StubEngine({ listing: ['a.txt'] });
+  const activities: Activity[] = [];
+  const session = await announcing(engine, activities);
+  assert.doesNotThrow(() => fromRoom(engine, 'a.txt', '\ud800'));
+  assert.deepEqual(activities, []);
+  fromRoom(engine, 'a.txt', '😀');
+  assert.deepEqual(activities, [{
+    kind: 'document', path: 'a.txt', length: 2, hunk: [], truncated: false, appeared: true,
+  }]);
+  const report = await session.waitForChange({ timeoutMs: 100 });
+  assert.equal(report.changes[0]?.kind, 'appeared');
+});

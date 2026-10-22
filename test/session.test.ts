@@ -5,6 +5,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { Session, SessionRefused } from '../src/session.ts';
@@ -395,6 +397,52 @@ test('a change that does not fit the replica is refused, and the hold is given u
   );
   assert.equal(engine.calls.includes('close a.txt'), true);
 });
+
+for (const input of ['to-high', 'to-low', 'from-high', 'from-low', 'equal-high', 'equal-low', 'split-pair']) {
+  test(`a malformed ${input} edit refuses without changing the engine, disk, or watermark`, async () => {
+    const root = await scratch('surrogate-edit');
+    const original = 'before😀\n';
+    const engine = new StubEngine({
+      role: 'host', invite: INVITE, listing: ['a.txt'], documents: ['a.txt'],
+      texts: new Map([['a.txt', original]]),
+    });
+    const session = new Session({ engines: new StubFactory(engine) });
+    try {
+      await put(root, 'a.txt', original);
+      await session.host({ root, serverUrl: 'ws://room.example', displayName: 'agent' });
+      await session.waitForChange({ timeoutMs: 100 });
+      const malformed = input.endsWith('low') ? 'bad\udfff\n' : 'bad\ud800\n';
+      const replica = input.startsWith('from') || input.startsWith('equal') ? malformed : original;
+      engine.remote('a.txt', replica);
+      const calls = engine.calls.length;
+      const editing = input === 'split-pair'
+        ? session.edit('a.txt', { start: 6, end: 7, text: '' })
+        : session.write('a.txt', input.startsWith('from') ? 'valid😀\n' : malformed);
+      await assert.rejects(editing, (error: unknown) => {
+        assert.ok(error instanceof SessionRefused);
+        assert.equal(error.code, 'bad-change');
+        assert.equal(error.message, 'cannot diff text containing an unpaired UTF-16 surrogate');
+        return true;
+      });
+      assert.equal(engine.text('a.txt'), replica);
+      assert.deepEqual(engine.calls.slice(calls), ['open a.txt', 'close a.txt']);
+      assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), original);
+      engine.remote('a.txt', 'recovered😁\n');
+      const report = await session.waitForChange({ timeoutMs: 100 });
+      assert.deepEqual(report.changes[0]?.hunk, ['-    1 before😀', '+    1 recovered😁']);
+      const repaired = await session.write('a.txt', 'valid😀\n');
+      assert.equal(repaired.disk, 'written');
+      assert.equal(engine.text('a.txt'), 'valid😀\n');
+      assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'valid😀\n');
+      assert.equal((await session.waitForChange({ timeoutMs: 1 })).timedOut, true);
+    } finally {
+      if (session.hasSession()) {
+        await session.leave();
+      }
+      await remove(root);
+    }
+  });
+}
 
 test('an edit of a path the grant would never name is refused', async () => {
   const engine = new StubEngine({ listing: ['.git/config'] });
