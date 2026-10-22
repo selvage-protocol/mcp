@@ -68,6 +68,36 @@ test('a line longer than the report can hold is cut, and the hunk says so', () =
   }
 });
 
+test('a hunk refuses malformed before, after, and equal inputs without rendering halves', () => {
+  for (const malformed of ['\ud800', '\udfff', 'one\n\ud800tail', '😀\udfff']) {
+    for (const [before, after] of [[malformed, 'valid😀'], ['valid😀', malformed], [malformed, malformed]] as const) {
+      assert.deepEqual(renderHunk(before, after), {
+        lines: [], truncated: false,
+        refusal: 'cannot report text containing an unpaired UTF-16 surrogate',
+      });
+    }
+  }
+});
+
+test('hunks preserve astral characters and never cut between their halves', () => {
+  assert.deepEqual(renderHunk('x😀y\n', 'x😁y\n'), {
+    lines: ['-    1 x😀y', '+    1 x😁y'], truncated: false,
+  });
+  assert.deepEqual(renderHunk('😀', '😀'), { lines: [], truncated: false });
+  // The pair straddles the 200-code-unit line bound, on both removed and inserted lines.
+  const prefix = 'x'.repeat(199);
+  const hunk = renderHunk(`${prefix}😀old\n`, `${prefix}😁new\n`);
+  assert.equal(hunk.refusal, undefined);
+  assert.equal(hunk.truncated, true);
+  assert.deepEqual(hunk.lines, [`-    1 ${prefix}…`, `+    1 ${prefix}…`]);
+  for (const line of hunk.lines) {
+    for (const character of line) {
+      const point = character.codePointAt(0) as number;
+      assert.ok(point < 0xd800 || point > 0xdfff, 'a hunk contains an unpaired surrogate');
+    }
+  }
+});
+
 test('an offset counts into a one-based line and column, whichever text it was taken in', () => {
   const text = 'one\ntwo\nthree';
   assert.deepEqual(positionAt(text, 0), { line: 1, column: 1 });

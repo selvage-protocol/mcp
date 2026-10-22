@@ -33,6 +33,7 @@ import {
   isGrantedPath,
   toCrdt,
 } from '../vendor/bridge/index.ts';
+import { hasLoneSurrogate } from '../vendor/bridge/editing.ts';
 import type { Engine, TextChange } from '../vendor/bridge/index.ts';
 import { sessionBase } from '../vendor/engine/index.ts';
 import type { EngineEvent, PeerInfo, Role } from '../vendor/engine/index.ts';
@@ -747,10 +748,10 @@ export class Session {
       return ready;
     }
     const watched = [...new Set(watch ?? this.defaultWatch())];
-    return await new Promise<WaitReport>((settle) => {
+    return await new Promise<WaitReport>((settle, reject) => {
       let finished = false;
       let settling: NodeJS.Timeout | undefined;
-      const finish = (report: WaitReport): void => {
+      const finish = (report: WaitReport | undefined, error?: unknown): void => {
         if (finished) {
           return;
         }
@@ -761,7 +762,21 @@ export class Session {
         clearTimeout(deadline);
         this.waiters.delete(wake);
         this.waitEnders.delete(end);
-        settle(report);
+        if (report === undefined) {
+          reject(error);
+        } else {
+          settle(report);
+        }
+      };
+      const check = (fallback?: () => WaitReport): void => {
+        try {
+          const report = this.takeChanges(watch, includeRoster) ?? fallback?.();
+          if (report !== undefined) {
+            finish(report);
+          }
+        } catch (error) {
+          finish(undefined, error);
+        }
       };
       // One edit can arrive as more than one frame — a replacement is a delete and an insert —
       // so a wake waits for the stream to go quiet before it reports. The settle is not re-armed
@@ -773,16 +788,13 @@ export class Session {
         }
         settling = setTimeout(() => {
           settling = undefined;
-          const report = this.takeChanges(watch, includeRoster);
-          if (report !== undefined) {
-            finish(report);
-          }
+          check();
         }, WAIT_SETTLE_MS);
       };
       const deadline = setTimeout(() => {
         // The deadline re-reads before it gives up, so a change that landed on the last frame is
         // reported rather than called a quiet room.
-        finish(this.takeChanges(watch, includeRoster) ?? this.deadlineReport(watch, options.timeoutMs));
+        check(() => this.deadlineReport(watch, options.timeoutMs));
       }, options.timeoutMs);
       const end = (): void => {
         finish(this.endedReport(watched));
@@ -867,6 +879,9 @@ export class Session {
       await this.awaitDocument(path);
       const replica = engine.text(path);
       wanted = next(replica);
+      if (hasLoneSurrogate(replica) || hasLoneSurrogate(wanted)) {
+        throw new SessionRefused('bad-change', 'cannot diff text containing an unpaired UTF-16 surrogate');
+      }
       if (overBound(wanted)) {
         throw new SessionRefused('too-large', `${path} would be over the ${MAX_GRANT_FILE_BYTES} bytes a session carries`);
       }
@@ -1432,12 +1447,14 @@ export class Session {
       // a seed — is a delta from that, not an arrival: the watermark is the fallback before this
       // channel has one of its own.
       const before = this.notifyBaseline.get(path) ?? this.baseline.get(path);
-      this.notifyBaseline.set(path, current);
-      if (before === undefined) {
-        this.emitDocument(path, current.length, [], false, true);
+      const hunk = renderHunk(before ?? '', current);
+      if (hunk.refusal !== undefined) {
+        this.note(path, 'bad-change', hunk.refusal);
       } else {
-        const hunk = renderHunk(before, current);
-        if (hunk.lines.length > 0) {
+        this.notifyBaseline.set(path, current);
+        if (before === undefined) {
+          this.emitDocument(path, current.length, [], false, true);
+        } else if (hunk.lines.length > 0) {
           this.emitDocument(path, current.length, hunk.lines, hunk.truncated, false);
         }
       }
@@ -1561,13 +1578,13 @@ export class Session {
         : { path, kind: 'disappeared', length: 0, hunk: [], truncated: false };
     }
     const after = engine.text(path);
+    const hunk = renderHunk(before ?? '', after);
+    if (hunk.refusal !== undefined) {
+      throw new SessionRefused('bad-change', `${path}: ${hunk.refusal}`);
+    }
     if (before === undefined) {
       return { path, kind: 'appeared', length: after.length, hunk: [], truncated: false };
     }
-    if (before === after) {
-      return undefined;
-    }
-    const hunk = renderHunk(before, after);
     if (hunk.lines.length === 0) {
       return undefined;
     }

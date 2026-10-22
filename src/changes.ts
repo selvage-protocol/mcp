@@ -13,6 +13,7 @@
  */
 
 import { diff } from '../vendor/bridge/index.ts';
+import { hasLoneSurrogate } from '../vendor/bridge/editing.ts';
 
 /** How many unchanged lines stand on each side of a changed region. */
 export const HUNK_CONTEXT_LINES = 3;
@@ -31,6 +32,8 @@ export interface Hunk {
   readonly lines: readonly string[];
   /** Whether the region held more lines than {@link MAX_HUNK_LINES} and was cut. */
   readonly truncated: boolean;
+  /** Malformed inputs are refused without rendering or normalizing either text. */
+  readonly refusal?: string;
 }
 
 interface Line {
@@ -90,6 +93,9 @@ function blockLines(text: string): string[] {
  * single region cannot name.
  */
 export function renderHunk(before: string, after: string): Hunk {
+  if (hasLoneSurrogate(before) || hasLoneSurrogate(after)) {
+    return { lines: [], truncated: false, refusal: 'cannot report text containing an unpaired UTF-16 surrogate' };
+  }
   const change = diff(before, after);
   if (change.start === change.end && change.text === '') {
     return { lines: [], truncated: false };
@@ -120,7 +126,12 @@ export function renderHunk(before: string, after: string): Hunk {
       return text;
     }
     cut = true;
-    return `${text.slice(0, MAX_HUNK_LINE_CHARS)}…`;
+    let end = MAX_HUNK_LINE_CHARS;
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) {
+      end -= 1;
+    }
+    return `${text.slice(0, end)}…`;
   };
   for (let at = contextFrom; at < firstChanged; at += 1) {
     const line = beforeLines[at];

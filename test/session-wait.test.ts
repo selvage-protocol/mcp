@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { Session } from '../src/session.ts';
+import { Session, SessionRefused } from '../src/session.ts';
 import type { WaitReport } from '../src/session.ts';
 import { StubEngine, StubFactory, peer } from './helpers/stub-engine.ts';
 
@@ -255,4 +255,64 @@ test('leaving under a held wait settles it at once, rather than at a deadline wi
   assert.equal(report.timedOut, false, 'a leave is not the deadline passing');
   assert.deepEqual(report.changes, []);
   assert.ok(Date.now() - started < 1_000, 'the leave settled the wait, not its own clock');
+});
+
+for (const trigger of ['settle', 'deadline'] as const) {
+  test(`a blocked wait refuses malformed text at ${trigger} and retains its watermark`, { timeout: 5_000 }, async () => {
+    const engine = new StubEngine({
+      listing: ['a.txt'], documents: ['a.txt'], texts: new Map([['a.txt', 'before😀\n']]),
+    });
+    const session = await joined(engine);
+    await session.waitForChange({ timeoutMs: 100 });
+    const waiting = session.waitForChange({ timeoutMs: trigger === 'deadline' ? 40 : 1_000 });
+    const rejected = assert.rejects(waiting, (error: unknown) => {
+      assert.ok(error instanceof SessionRefused);
+      assert.equal(error.code, 'bad-change');
+      assert.match(error.message, /unpaired UTF-16 surrogate/);
+      return true;
+    });
+    engine.remote('a.txt', 'bad\ud800\n');
+    if (trigger === 'settle') {
+      assert.doesNotThrow(() => engine.emit({ type: 'documentChanged', path: 'a.txt' }));
+    }
+    await rejected;
+    await assert.rejects(session.waitForChange({ timeoutMs: 100 }), { name: 'SessionRefused', code: 'bad-change' });
+    fromRoom(engine, 'a.txt', 'recovered😁\n');
+    const report = await session.waitForChange({ timeoutMs: 100 });
+    assert.deepEqual(report.changes[0]?.hunk, ['-    1 before😀', '+    1 recovered😁']);
+    assert.equal((await session.waitForChange({ timeoutMs: 1 })).timedOut, true);
+    await session.leave();
+  });
+}
+
+test('a malformed path refuses a whole report without consuming other paths or the roster/listing', async () => {
+  const engine = new StubEngine({
+    listing: ['a.txt', 'b.txt'], documents: ['a.txt', 'b.txt'],
+    texts: new Map([['a.txt', 'a😀\n'], ['b.txt', 'b😀\n']]),
+  });
+  const session = await joined(engine);
+  await session.waitForChange({ timeoutMs: 100 });
+  fromRoom(engine, 'a.txt', 'A😁\n');
+  fromRoom(engine, 'b.txt', 'bad\udfff\n');
+  engine.peers = [peer('p1', 'dana', 'guest')];
+  engine.emit({ type: 'peersChanged', peers: [...engine.peers] });
+  engine.emit({ type: 'grantChanged', paths: ['a.txt', 'b.txt'] });
+  await assert.rejects(session.waitForChange({ timeoutMs: 100 }), { name: 'SessionRefused', code: 'bad-change' });
+  fromRoom(engine, 'b.txt', 'B😁\n');
+  const report = await session.waitForChange({ timeoutMs: 100 });
+  assert.deepEqual(report.changes.map((change) => change.hunk), [
+    ['-    1 a😀', '+    1 A😁'], ['-    1 b😀', '+    1 B😁'],
+  ]);
+  assert.equal(report.peersChanged, true);
+  assert.equal(report.listingChanged, true);
+});
+
+test('a malformed arrival is refused and repair remains an arrival', async () => {
+  const engine = new StubEngine({ listing: ['a.txt'], texts: new Map([['a.txt', '\ud800']]) });
+  const session = await joined(engine);
+  await assert.rejects(session.waitForChange({ timeoutMs: 100 }), { name: 'SessionRefused', code: 'bad-change' });
+  fromRoom(engine, 'a.txt', '😀');
+  const report = await session.waitForChange({ timeoutMs: 100 });
+  assert.equal(report.changes[0]?.kind, 'appeared');
+  assert.equal(report.changes[0]?.length, 2);
 });
