@@ -9,7 +9,8 @@
 #   scripts/ci-local.sh lint     # actionlint over the workflow files
 #   scripts/ci-local.sh links    # lychee over README.md: every relative link and every URL the
 #                                # reader-facing prose carries
-#   scripts/ci-local.sh all      # lint + checks + e2e + links
+#   scripts/ci-local.sh contracts WORKSPACE SPEC_REF --revision mcp=REF --revision vscode_client=REF
+#   scripts/ci-local.sh all      # lint + checks + e2e + links (contracts require explicit inputs)
 #
 # Keep `checks`, `lint`, `links` and `e2e` in step with the workflow — they run the same commands,
 # so that a red job is found here rather than on a runner. `e2e` is the one step whose server the
@@ -63,6 +64,23 @@ job_e2e() {
   SELVAGE_SELVAGED=$binary npm run test:e2e
 }
 
+job_contracts() (
+  if [ "$#" -lt 2 ]; then
+    printf 'usage: %s contracts WORKSPACE SPEC_REF --revision mcp=REF --revision vscode_client=REF\n' "$0" >&2
+    exit 2
+  fi
+  workspace=$(cd -- "$1" && pwd)
+  specification_ref=$2
+  shift 2
+  checker=$(mktemp "$TMPDIR/check-workspace.XXXXXX.py")
+  trap 'rm -f "$checker"' EXIT
+  specification_sha=$(git -C "$workspace/specification" rev-parse --verify "${specification_ref}^{commit}")
+  say "contracts: specification=$specification_sha"
+  git -C "$workspace/specification" show "$specification_sha:scripts/check-workspace.py" > "$checker"
+  python3 "$checker" --workspace "$workspace" --consumer mcp \
+    --revision "specification=$specification_sha" "$@"
+)
+
 job_lint() {
   say "lint: actionlint over the workflows"
   nix shell nixpkgs#actionlint -c actionlint
@@ -82,9 +100,10 @@ case "${1:-all}" in
   e2e) job_e2e ;;
   lint) job_lint ;;
   links) job_links ;;
+  contracts) shift; job_contracts "$@" ;;
   all) job_lint; job_checks; job_e2e; job_links ;;
   *)
-    printf 'usage: %s [checks|e2e|lint|links|all]\n' "$0" >&2
+    printf 'usage: %s [checks|e2e|lint|links|contracts WORKSPACE SPEC_REF --revision REPO=REF ...|all]\n' "$0" >&2
     exit 2
     ;;
 esac

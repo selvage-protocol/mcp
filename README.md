@@ -194,6 +194,11 @@ is reported with its document and no position, rather than at a position this se
 - **A host cannot create a file its folder does not already hold.** The write side of the path
   clamp is a read: a write happens only for a path the folder already resolves to a plain file of
   it, so a path the room has and the folder does not is a recorded refusal, not a new file.
+- **Queued host write-back is not generation-bound.** `applyFromRoom` reads the current engine
+  and root inside a serialized callback; ending a session clears the write queue map without
+  canceling callbacks already queued. A callback could therefore observe a subsequent session's
+  engine and folder. This is an unreproduced lifecycle limitation, not a demonstrated failure
+  or a claimed fix. The absent-document guard does not establish session-generation isolation.
 - **Nothing republishes the listing after the initial walk.** The paths a host's walk finds are
   the room's listing for the life of the session; a file added to the folder later is not listed
   until a new session, and no folder watcher runs on this side.
@@ -220,7 +225,7 @@ a page.
 
 ## Tests
 
-`npm run typecheck` and `npm test` are what CI runs, and they need nothing but Node: the suite
+After `npm ci`, `npm run typecheck` and `npm test` run the server-free checks in CI. The suite
 includes interop against a real third-party client, the official `@modelcontextprotocol/sdk`,
 driving the shipped process.
 
@@ -236,8 +241,61 @@ through `SELVAGE_SELVAGED` or as a sibling `reference_server`'s build. The runne
 checkout, so CI and `scripts/ci-local.sh e2e` both take the published binary from its image
 instead — `scripts/fetch-selvaged.sh`, a second of network — and name it in `SELVAGE_SELVAGED`.
 
-`nix develop . --max-jobs 2 -c ./scripts/ci-local.sh all` runs this checkout's whole gate: lint,
-checks, e2e, links.
+`nix develop . --max-jobs 2 -c ./scripts/ci-local.sh all` runs this checkout's local gate: lint,
+checks, released-server e2e, links. The existing owner flake and lock remain unchanged.
+
+### Current-source server compatibility
+
+The separate public `current-server.yml` workflow runs weekly and on manual dispatch. It
+checks out public `reference_server` `main`, logs its resolved SHA and the MCP candidate SHA,
+builds a fresh `selvaged` with Rust 1.99.1 and `cargo build --locked`, then runs the existing
+`npm run test:e2e` suite with Node 22.18.0. It has a 40-minute job timeout, shorter build/test
+step timeouts, and retains build/test logs for seven days on failure. It does not replace the
+digest-checked released-server E2E in `ci.yml`; a current-source build or test failure is red,
+not treated as evidence of compatibility.
+
+To run against an explicit local source build instead:
+
+```sh
+cargo build --locked --manifest-path /path/to/reference_server/Cargo.toml -p selvaged
+npm ci
+SELVAGE_SELVAGED=/path/to/reference_server/target/debug/selvaged npm run test:e2e
+```
+
+### Public copy contracts
+
+`contracts.yml` runs the public specification's `scripts/check-workspace.py` against this
+candidate's committed `HEAD` and current public VS Code `main`. It compares engine
+and bridge copies and CRDT dependency versions. It logs every resolved input SHA,
+uses read-only permissions, and does not persist checkout credentials. The executable
+checker is pinned to a reviewed public specification commit; canonical VS Code source
+resolves once from `main` so upstream changes remain visible. Sync from the exact canonical
+commit reported by the job; do not freeze that ref or hand-edit vendored sources to make
+the check pass.
+
+Locally, arrange Git repositories named `mcp`, `vscode_client`, and `specification` under an
+explicit workspace (a symlink to this worktree is fine), then supply the revisions:
+
+```sh
+bash scripts/ci-local.sh contracts /path/to/workspace SPECIFICATION_SHA \
+  --revision mcp=HEAD --revision vscode_client=VSCODE_SHA
+```
+
+The wrapper extracts the checker from the supplied specification commit with `git show` and
+passes `--revision specification=RESOLVED_SHA`. It does not execute an uncommitted checker.
+The equivalent public command, using the checker checked out at `SPECIFICATION_SHA`, is:
+
+```sh
+python3 /path/to/specification/scripts/check-workspace.py \
+  --workspace /path/to/workspace --consumer mcp \
+  --revision mcp=HEAD --revision vscode_client=VSCODE_SHA \
+  --revision specification=SPECIFICATION_SHA
+```
+
+No Neovim checkout or private coordination files are needed. Missing repositories or refs fail
+rather than falling back to working-tree files. `HEAD` compares committed content, so commit
+candidate changes before relying on the comparison. Contracts are separate from `all`, since
+the workspace and every compared revision must be explicit.
 
 ## Licence
 
