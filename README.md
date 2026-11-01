@@ -8,8 +8,7 @@ It is a client of the session protocol, like the editor clients: it drives the s
 and speaks the same wire, so an agent and a person edit the same documents and see each other's
 changes.
 
-Status: v1 in progress, feature-frozen at what works: hosting, joining by invite, and editing in
-both directions work today.
+Status: v1 in progress. Hosting, joining by invite, and editing in both directions work today.
 
 ## Get it working
 
