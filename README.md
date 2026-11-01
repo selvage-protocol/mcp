@@ -8,7 +8,13 @@ It is a client of the session protocol, like the editor clients: it drives the s
 and speaks the same wire, so an agent and a person edit the same documents and see each other's
 changes.
 
-Status: v1 in progress. Hosting, joining by invite, and editing in both directions work today.
+Status: v1 in progress, feature-frozen at what works: hosting, joining by invite, and editing in
+both directions work today.
+[The recording](docs/images/selvage-demo.mp4) is one run of the demo:
+`reference_server/scripts/demo/demo.sh` starts a server, this client, a second client, a browser
+page and an agent in one room. It is one command, and
+[Get it working](https://selvage.dontblameme.dev/get-it-working) has the whole of it.
+
 
 ## Get it working
 
