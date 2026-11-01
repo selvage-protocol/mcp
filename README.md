@@ -10,11 +10,6 @@ changes.
 
 Status: v1 in progress, feature-frozen at what works: hosting, joining by invite, and editing in
 both directions work today.
-[The recording](docs/images/selvage-demo.mp4) is one run of the demo:
-`reference_server/scripts/demo/demo.sh` starts a server, this client, a second client, a browser
-page and an agent in one room. It is one command, and `reference_server/docs/demo.md` says
-what it starts.
-
 
 ## Get it working
 
