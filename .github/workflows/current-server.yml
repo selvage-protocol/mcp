@@ -1,0 +1,84 @@
+name: current-source server E2E
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: current-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  current-server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUST_VERSION: "1.99.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: mcp
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: selvage-protocol/reference_server
+          ref: main
+          path: reference_server
+          persist-credentials: false
+
+      - name: log the exact source inputs
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/server-target" >> "$GITHUB_ENV"
+          echo "SELVAGE_SELVAGED=$RUNNER_TEMP/server-target/debug/selvaged" >> "$GITHUB_ENV"
+          mkdir -p ci-evidence
+          for repo in mcp reference_server; do
+            printf '%s=' "$repo"
+            git -C "$repo" rev-parse HEAD
+          done | tee ci-evidence/revisions.log
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.18.0"
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: install the pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+
+      - name: record tool versions
+        run: |
+          { node --version; npm --version; rustc +"$RUST_VERSION" --version; } \
+            | tee ci-evidence/tools.log
+
+      - name: build the current public reference server
+        timeout-minutes: 25
+        run: |
+          cargo +"$RUST_VERSION" build --locked --manifest-path reference_server/Cargo.toml -p selvaged \
+            2>&1 | tee ci-evidence/server-build.log
+          "$SELVAGE_SELVAGED" --version | tee ci-evidence/server-version.log
+
+      - name: install and build MCP
+        working-directory: mcp
+        run: npm ci
+
+      - name: the two-process proof against current server source
+        timeout-minutes: 10
+        working-directory: mcp
+        run: npm run test:e2e 2>&1 | tee ../ci-evidence/e2e.log
+
+      - name: retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: current-server-failure
+          path: ci-evidence/*.log
+          if-no-files-found: warn
+          retention-days: 7

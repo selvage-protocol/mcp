@@ -2,17 +2,16 @@
 #
 # The sync engine and the bridge in `vendor/` are vendored, not authored here: the canonical
 # copies live in the VS Code client (`selvage-protocol/vscode_client`, its `src/engine` and
-# `src/bridge`). `DESIGN.md` §6 splits a client into a sync engine and an editor adapter, and
-# this repository is an editor adapter — the server takes part in a session by driving the
+# `src/bridge`). This repository is an adapter — the server takes part in a session by driving the
 # engine that already speaks the wire, so it is copied rather than written a second time.
 #
 #   scripts/sync-engine.sh [path-to-vscode_client-checkout] [ref]
 #
 # The default source is the sibling checkout `../vscode_client`, and the default ref is that
 # checkout's *published* tree — `refs/remotes/origin/main`, else `main`, else `HEAD`. The
-# published ref rather than the working tree, because a working tree carries whatever is
-# half-written in it and `ai_notes/scripts/check-workspace.sh` compares cross-repository copies
-# against the published ref. The script copies and then reports the difference, so a run either
+# published ref rather than the working tree avoids copying unfinished edits. The public
+# copy-contract job compares explicit committed revisions (see README.md). This script copies
+# and then reports the difference, so a run either
 # brings `vendor/` into agreement or says what it could not.
 set -euo pipefail
 

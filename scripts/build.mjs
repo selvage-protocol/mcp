@@ -23,7 +23,7 @@
  *
  * What it costs: the artifact is a directory of chunks rather than one file, and a stack trace
  * names `dist/main.js` and a line rather than the file under `vendor/` it came from. No
- * source map ships with it; see `NOTES-packaging.md`.
+ * source map ships with it; reproduce against `src/main.ts` when source locations are needed.
  */
 
 import { build } from 'esbuild';
