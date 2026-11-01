@@ -24,7 +24,7 @@
     # Node `nix develop` hands out and the dependency tree they resolve against is built from
     # the committed lock file rather than from a checkout's directory.
     mkSelvage = pkgs: let
-      node = pkgs.nodejs_22;
+      node = pkgs.nodejs_26;
 
       # The server is Node, and its imports — the vendored engine's `yjs`, `y-protocols`,
       # `lib0` and `ws` along with the sources' own — resolve from a `node_modules` beside
@@ -99,8 +99,8 @@
 
     checks = forAllSelvage (
       pkgs: selvage: let
-        # The suites run in a writable copy of the source with the store's dependency tree
-        # linked in: flake sources are read-only, and the suites write scratch under `.tmp/`.
+        # The suites need writable source and dependencies: the packed install prunes its
+        # copy of node_modules, and copying read-only directories preserves their permissions.
         #
         # The suite's own output goes to stderr, and `$out` gets one stable line: the log
         # carries per-test timings, and a derivation whose output differs from build to build
@@ -113,7 +113,8 @@
           ''
             cp -r ${self} work
             chmod -R u+w work
-            ln -s ${selvage.nodeModules}/node_modules work/node_modules
+            cp -r ${selvage.nodeModules}/node_modules work/node_modules
+            chmod -R u+w work/node_modules
             cd work
             export HOME=$TMPDIR
             log=$TMPDIR/suite.log
@@ -152,7 +153,13 @@
           "npm test"
         ];
 
-        pre-commit = selvage.hooks;
+        # The sandbox checks local links; the checkout hook also checks remote URLs.
+        pre-commit =
+          (selvage.hooks.extendModules {
+            modules = [{hooks.lychee.args = pkgs.lib.mkAfter ["--offline"];}];
+          }).config.run.overrideAttrs {
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          };
       }
     );
   };

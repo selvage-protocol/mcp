@@ -242,14 +242,14 @@ checkout, so CI and `scripts/ci-local.sh e2e` both take the published binary fro
 instead — `scripts/fetch-selvaged.sh`, a second of network — and name it in `SELVAGE_SELVAGED`.
 
 `nix develop . --max-jobs 2 -c ./scripts/ci-local.sh all` runs this checkout's local gate: lint,
-checks, released-server e2e, links. The existing owner flake and lock remain unchanged.
+checks, released-server e2e, links.
 
 ### Current-source server compatibility
 
 The separate public `current-server.yml` workflow runs weekly and on manual dispatch. It
 checks out public `reference_server` `main`, logs its resolved SHA and the MCP candidate SHA,
 builds a fresh `selvaged` with Rust 1.99.1 and `cargo build --locked`, then runs the existing
-`npm run test:e2e` suite with Node 22.18.0. It has a 40-minute job timeout, shorter build/test
+`npm run test:e2e` suite with Node 26.13.0. It has a 40-minute job timeout, shorter build/test
 step timeouts, and retains build/test logs for seven days on failure. It does not replace the
 digest-checked released-server E2E in `ci.yml`; a current-source build or test failure is red,
 not treated as evidence of compatibility.
