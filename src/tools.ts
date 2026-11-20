@@ -408,7 +408,7 @@ function listPaths(session: Session, args: Readonly<Record<string, unknown>>): C
     );
   }
   const prefix = optionalText(args, 'prefix') ?? '';
-  const matching = [...session.grantedPaths()].filter((path) => path.startsWith(prefix)).sort();
+  const matching = session.grantedPaths().filter((path) => path.startsWith(prefix)).sort();
   if (matching.length === 0) {
     return answer(
       prefix === ''
@@ -477,19 +477,6 @@ function matchCount(hay: string, needle: string): number {
   return count;
 }
 
-/**
- * The occurrences a `split`/`join` replacement touches, which never overlap: `'aaa'` holds one
- * `'aa'` for a `replace_all`, and two for `matchCount`. This is the count an answer reports.
- */
-function occurrencesOf(hay: string, needle: string): number {
-  let count = 0;
-  let at = hay.indexOf(needle);
-  while (at !== -1) {
-    count += 1;
-    at = hay.indexOf(needle, at + needle.length);
-  }
-  return count;
-}
 
 /**
  * What the edit should hold and how much of the text it replaced, or the reason to refuse.
@@ -512,6 +499,9 @@ type Wanted =
  * something in it.
  */
 function resentPair(hay: string, old: string, replacement: string): readonly string[] | undefined {
+  if (!hay.includes('\n') || !replacement.includes('\n')) {
+    return undefined;
+  }
   const kept = new Set<string>();
   const lines = hay.split(old).join('').split('\n');
   for (let at = 0; at + 1 < lines.length; at += 1) {
@@ -562,8 +552,9 @@ function wantedText(hay: string, old: string, replacement: string, all: boolean)
     };
   }
   if (all) {
-    const text = hay.split(old).join(replacement);
-    return { text, replacements: text === hay ? 0 : occurrencesOf(hay, old) };
+    const parts = hay.split(old);
+    const text = parts.join(replacement);
+    return { text, replacements: text === hay ? 0 : parts.length - 1 };
   }
   const at = hay.indexOf(old);
   const text = hay.slice(0, at) + replacement + hay.slice(at + old.length);
