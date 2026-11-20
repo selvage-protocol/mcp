@@ -13,7 +13,7 @@
  */
 
 import { diff } from '../vendor/bridge/index.ts';
-import { hasLoneSurrogate } from '../vendor/bridge/editing.ts';
+import type { TextChange } from '../vendor/bridge/index.ts';
 
 /** How many unchanged lines stand on each side of a changed region. */
 export const HUNK_CONTEXT_LINES = 3;
@@ -36,31 +36,37 @@ export interface Hunk {
   readonly refusal?: string;
 }
 
-interface Line {
-  readonly start: number;
-  readonly text: string;
-}
-
-function linesOf(text: string): Line[] {
-  const lines: Line[] = [];
-  let start = 0;
-  for (let at = 0; at < text.length; at += 1) {
-    if (text[at] === '\n') {
-      lines.push({ start, text: text.slice(start, at) });
-      start = at + 1;
-    }
+/** The start offset of every line in a text, including the empty line a trailing newline leaves. */
+function lineStartsOf(text: string): number[] {
+  const starts: number[] = [0];
+  let at = text.indexOf('\n');
+  while (at !== -1) {
+    starts.push(at + 1);
+    at = text.indexOf('\n', at + 1);
   }
-  lines.push({ start, text: text.slice(start) });
-  return lines;
+  return starts;
 }
 
 /** The index of the line an offset sits on, in the text the offset was counted in. */
-function lineAt(lines: readonly Line[], offset: number): number {
-  let index = 0;
-  while (index + 1 < lines.length && (lines[index + 1]?.start ?? 0) <= offset) {
-    index += 1;
+function lineAt(starts: readonly number[], offset: number): number {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >>> 1;
+    if ((starts[middle] ?? 0) <= offset) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
   }
-  return index;
+  return low;
+}
+
+/** One line without its newline, read only when a hunk actually prints it. */
+function lineText(text: string, starts: readonly number[], index: number): string {
+  const start = starts[index] ?? text.length;
+  const end = text.indexOf('\n', start);
+  return text.slice(start, end === -1 ? text.length : end);
 }
 
 /** The start of the line an offset sits on. */
@@ -93,14 +99,22 @@ function blockLines(text: string): string[] {
  * single region cannot name.
  */
 export function renderHunk(before: string, after: string): Hunk {
-  if (hasLoneSurrogate(before) || hasLoneSurrogate(after)) {
-    return { lines: [], truncated: false, refusal: 'cannot report text containing an unpaired UTF-16 surrogate' };
+  let change: TextChange;
+  try {
+    change = diff(before, after);
+  } catch (error: unknown) {
+    if (
+      error instanceof RangeError &&
+      error.message === 'cannot diff text containing an unpaired UTF-16 surrogate'
+    ) {
+      return { lines: [], truncated: false, refusal: 'cannot report text containing an unpaired UTF-16 surrogate' };
+    }
+    throw error;
   }
-  const change = diff(before, after);
   if (change.start === change.end && change.text === '') {
     return { lines: [], truncated: false };
   }
-  const beforeLines = linesOf(before);
+  const starts = lineStartsOf(before);
   // The region is widened to whole lines: a change in the middle of a line is reported as the
   // whole line replaced, which is what a reader of a unified diff expects and what keeps the
   // line numbers honest. A pure insertion at a line boundary touches no old line at all.
@@ -114,11 +128,11 @@ export function renderHunk(before: string, after: string): Hunk {
         : lineEnd(before, change.start);
   const removed = blockLines(before.slice(from, to));
   const inserted = blockLines(before.slice(from, change.start) + change.text + before.slice(change.end, to));
-  const firstChanged = lineAt(beforeLines, from);
+  const firstChanged = lineAt(starts, from);
   const lastChanged = removed.length === 0 ? firstChanged - 1 : firstChanged + removed.length - 1;
   const delta = inserted.length - removed.length;
   const contextFrom = Math.max(0, firstChanged - HUNK_CONTEXT_LINES);
-  const contextTo = Math.min(beforeLines.length - 1, lastChanged + HUNK_CONTEXT_LINES);
+  const contextTo = Math.min(starts.length - 1, lastChanged + HUNK_CONTEXT_LINES);
   const out: string[] = [];
   let cut = false;
   const clamp = (text: string): string => {
@@ -134,11 +148,11 @@ export function renderHunk(before: string, after: string): Hunk {
     return `${text.slice(0, end)}…`;
   };
   for (let at = contextFrom; at < firstChanged; at += 1) {
-    const line = beforeLines[at];
-    if (line === undefined || isEnd(line, before)) {
+    const start = starts[at];
+    if (start === undefined || start === before.length) {
       continue;
     }
-    out.push(context(at + 1, clamp(line.text)));
+    out.push(context(at + 1, clamp(lineText(before, starts, at))));
   }
   for (const [at, text] of removed.entries()) {
     out.push(mark('-', firstChanged + 1 + at, clamp(text)));
@@ -147,11 +161,11 @@ export function renderHunk(before: string, after: string): Hunk {
     out.push(mark('+', firstChanged + 1 + at, clamp(text)));
   }
   for (let at = lastChanged + 1; at <= contextTo; at += 1) {
-    const line = beforeLines[at];
-    if (line === undefined || isEnd(line, before)) {
+    const start = starts[at];
+    if (start === undefined || start === before.length) {
       continue;
     }
-    out.push(context(at + 1 + delta, clamp(line.text)));
+    out.push(context(at + 1 + delta, clamp(lineText(before, starts, at))));
   }
   if (out.length <= MAX_HUNK_LINES) {
     return { lines: out, truncated: cut };
@@ -159,10 +173,6 @@ export function renderHunk(before: string, after: string): Hunk {
   return { lines: out.slice(0, MAX_HUNK_LINES), truncated: true };
 }
 
-/** The empty line a trailing newline leaves at the end of the text, which is not a line. */
-function isEnd(line: Line, text: string): boolean {
-  return line.start === text.length && line.text === '';
-}
 
 function mark(sign: '-' | '+', line: number, text: string): string {
   return `${sign} ${String(line).padStart(4)} ${text}`;
@@ -183,11 +193,11 @@ export function positionAt(text: string, offset: number): Position {
   const clamped = Math.max(0, Math.min(offset, text.length));
   let line = 1;
   let start = 0;
-  for (let at = 0; at < clamped; at += 1) {
-    if (text[at] === '\n') {
-      line += 1;
-      start = at + 1;
-    }
+  let newline = text.indexOf('\n');
+  while (newline !== -1 && newline < clamped) {
+    line += 1;
+    start = newline + 1;
+    newline = text.indexOf('\n', newline + 1);
   }
   return { line, column: clamped - start + 1 };
 }

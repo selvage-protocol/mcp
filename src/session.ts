@@ -33,10 +33,10 @@ import {
   isGrantedPath,
   toCrdt,
 } from '../vendor/bridge/index.ts';
-import { hasLoneSurrogate } from '../vendor/bridge/editing.ts';
 import type { Engine, TextChange } from '../vendor/bridge/index.ts';
+import { hasLoneSurrogate } from '../vendor/bridge/editing.ts';
 import { sessionBase } from '../vendor/engine/index.ts';
-import type { EngineEvent, PeerInfo, Role } from '../vendor/engine/index.ts';
+import type { EngineEvent, PeerInfo, Role, SessionInfo } from '../vendor/engine/index.ts';
 import { MAX_HUNK_LINES, positionAt, renderHunk } from './changes.ts';
 import type { Position } from './changes.ts';
 import { enumerateGrant, readGrantedFile, writeGrantedFile } from './grant.ts';
@@ -1447,15 +1447,22 @@ export class Session {
       // a seed — is a delta from that, not an arrival: the watermark is the fallback before this
       // channel has one of its own.
       const before = this.notifyBaseline.get(path) ?? this.baseline.get(path);
-      const hunk = renderHunk(before ?? '', current);
-      if (hunk.refusal !== undefined) {
-        this.note(path, 'bad-change', hunk.refusal);
-      } else {
-        this.notifyBaseline.set(path, current);
-        if (before === undefined) {
+      if (before === undefined) {
+        if (hasLoneSurrogate(current)) {
+          this.note(path, 'bad-change', 'cannot report text containing an unpaired UTF-16 surrogate');
+        } else {
+          this.notifyBaseline.set(path, current);
           this.emitDocument(path, current.length, [], false, true);
-        } else if (hunk.lines.length > 0) {
-          this.emitDocument(path, current.length, hunk.lines, hunk.truncated, false);
+        }
+      } else {
+        const hunk = renderHunk(before, current);
+        if (hunk.refusal !== undefined) {
+          this.note(path, 'bad-change', hunk.refusal);
+        } else {
+          this.notifyBaseline.set(path, current);
+          if (hunk.lines.length > 0) {
+            this.emitDocument(path, current.length, hunk.lines, hunk.truncated, false);
+          }
         }
       }
     }
@@ -1527,12 +1534,13 @@ export class Session {
       if (change === undefined) {
         continue;
       }
-      if (changes.length > 0 && bytes + sizeOfChange(change) > MAX_REPORT_BYTES) {
+      const size = sizeOfChange(change);
+      if (changes.length > 0 && bytes + size > MAX_REPORT_BYTES) {
         omitted += 1;
         continue;
       }
       changes.push(change);
-      bytes += sizeOfChange(change);
+      bytes += size;
       committed.push(path);
     }
     const peers = includeRoster && this.pendingPeers;
@@ -1542,6 +1550,7 @@ export class Session {
       // answer that is not coming.
       return this.live ? undefined : this.summary(watched, false, true, 0);
     }
+    const info = engine.session();
     for (const path of committed) {
       if (engine.has(path)) {
         this.baseline.set(path, engine.text(path));
@@ -1563,8 +1572,8 @@ export class Session {
       ended: false,
       omitted,
       watched: watched.length,
-      documents: engine.session().documents.length,
-      participants: this.participants().length,
+      documents: info.documents.length,
+      participants: participantCount(info),
       timeoutMs: 0,
     };
   }
@@ -1578,12 +1587,15 @@ export class Session {
         : { path, kind: 'disappeared', length: 0, hunk: [], truncated: false };
     }
     const after = engine.text(path);
-    const hunk = renderHunk(before ?? '', after);
+    if (before === undefined) {
+      if (hasLoneSurrogate(after)) {
+        throw new SessionRefused('bad-change', `${path}: cannot report text containing an unpaired UTF-16 surrogate`);
+      }
+      return { path, kind: 'appeared', length: after.length, hunk: [], truncated: false };
+    }
+    const hunk = renderHunk(before, after);
     if (hunk.refusal !== undefined) {
       throw new SessionRefused('bad-change', `${path}: ${hunk.refusal}`);
-    }
-    if (before === undefined) {
-      return { path, kind: 'appeared', length: after.length, hunk: [], truncated: false };
     }
     if (hunk.lines.length === 0) {
       return undefined;
@@ -1612,6 +1624,7 @@ export class Session {
     omitted: number,
   ): WaitReport {
     const engine = this.requireLive('waiting for a change');
+    const info = engine.session();
     return {
       changes: [],
       peersChanged: false,
@@ -1620,8 +1633,8 @@ export class Session {
       ended,
       omitted,
       watched: watched.length,
-      documents: engine.session().documents.length,
-      participants: this.participants().length,
+      documents: info.documents.length,
+      participants: participantCount(info),
       timeoutMs: 0,
     };
   }
@@ -1701,6 +1714,16 @@ function sizeOfChange(change: PathChange): number {
     total += Buffer.byteLength(line, 'utf8') + 1;
   }
   return total;
+}
+
+/** How many distinct seats a report names, without resolving a single cursor. */
+function participantCount(info: SessionInfo): number {
+  const seen = new Set<string>();
+  seen.add(info.peer.peer_id);
+  for (const peer of info.peers) {
+    seen.add(peer.peer_id);
+  }
+  return seen.size;
 }
 
 /**

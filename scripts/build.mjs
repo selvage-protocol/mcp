@@ -51,6 +51,8 @@ await build({
   format: 'esm',
   platform: 'node',
   target: 'node22',
+  minifySyntax: true,
+  minifyWhitespace: true,
   // Every bare specifier — `yjs`, `ws`, `lib0`, `y-protocols` and a `node:` builtin alike —
   // stays an import for the runtime to resolve, and only this repository's own relative code is
   // compiled in.
@@ -85,7 +87,7 @@ if ((statSync(outfile).mode & 0o111) === 0) {
 // one esbuild hoisted above the entry's own first statement, and `lib0` reads the browser-storage
 // global as it is evaluated: answered too late, that read is a warning on stderr ahead of this
 // server's first diagnostic. The engine belongs in the chunk `src/main.ts` imports it from.
-const eager = [...text.matchAll(/^import\s[^;]*?from\s+"([^"]+)"/gm)]
+const eager = [...text.matchAll(/(?:^|;)\s*import\s*(?:[^;]*?\bfrom\s*)?["']([^"']+)["']/gm)]
   .map((match) => match[1])
   .filter((specifier) => !specifier.startsWith('node:'));
 if (eager.length > 0) {

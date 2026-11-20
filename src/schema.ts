@@ -232,18 +232,33 @@ function join(at: string, name: string): string {
 
 /** Every way `value` fails `schema`, in the order the schema names them. Empty means it passes. */
 export function validate(value: unknown, schema: JsonSchema, at = ''): string[] {
-  const where = at === '' ? 'arguments' : at;
   const problems: string[] = [];
+  validateInto(value, schema, at, problems);
+  return problems;
+}
+
+/**
+ * The same check as `validate`, appending to one list instead of allocating a list per level.
+ * A nested object or array has no problems of its own to return, so a tool call that fits its
+ * schema pays for the one array its caller keeps rather than one per property.
+ */
+function validateInto(
+  value: unknown,
+  schema: JsonSchema,
+  at: string,
+  problems: string[],
+): void {
+  const where = at === '' ? 'arguments' : at;
 
   if (schema.enum !== undefined && !schema.enum.some((member) => sameValue(member, value))) {
     problems.push(`${where}: ${JSON.stringify(value)} is not one of ${JSON.stringify(schema.enum)}`);
-    return problems;
+    return;
   }
 
   const types = typesOf(schema);
   if (types.length > 0 && !types.some((type) => matchesType(value, type))) {
     problems.push(`${where}: expected ${types.join(' or ')}, got ${describe(value)}`);
-    return problems;
+    return;
   }
 
   if (isRecord(value) && types.includes('object')) {
@@ -259,23 +274,21 @@ export function validate(value: unknown, schema: JsonSchema, at = ''): string[] 
     for (const [name, item] of Object.entries(value)) {
       const sub = Object.hasOwn(properties, name) ? properties[name] : undefined;
       if (sub !== undefined) {
-        problems.push(...validate(item, sub, join(at, name)));
+        validateInto(item, sub, join(at, name), problems);
         continue;
       }
       const additional = schema.additionalProperties;
       if (additional === false) {
         problems.push(`${join(at, name)}: unknown property`);
       } else if (isRecord(additional)) {
-        problems.push(...validate(item, additional, join(at, name)));
+        validateInto(item, additional, join(at, name), problems);
       }
     }
   }
 
   if (Array.isArray(value) && types.includes('array') && schema.items !== undefined) {
     value.forEach((item, index) => {
-      problems.push(...validate(item, schema.items as JsonSchema, join(at, String(index))));
+      validateInto(item, schema.items as JsonSchema, join(at, String(index)), problems);
     });
   }
-
-  return problems;
 }
